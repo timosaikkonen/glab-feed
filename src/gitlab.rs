@@ -51,7 +51,7 @@ query($fullPath: ID!) {
       nodes {
         iid title webUrl draft createdAt updatedAt
         author { username name }
-        approved
+        approvedBy { nodes { username } }
         userNotesCount
         notes(last: 30) { nodes { author { username } createdAt system } }
         headPipeline { status }
@@ -103,7 +103,8 @@ struct MrNode {
     #[serde(rename = "updatedAt")]
     updated_at: DateTime<Utc>,
     author: Option<UserRef>,
-    approved: bool,
+    #[serde(rename = "approvedBy")]
+    approved_by: UserConnection,
     #[serde(rename = "userNotesCount")]
     user_notes_count: u32,
     notes: NoteConnection,
@@ -116,6 +117,11 @@ struct UserRef {
     username: String,
     #[serde(default)]
     name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UserConnection {
+    nodes: Vec<UserRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,7 +224,10 @@ pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<Mer
                 web_url: n.web_url,
                 author_username: author,
                 author_name: name,
-                approved: n.approved,
+                // `MergeRequest.approved` is true whenever approval requirements
+                // are met, including when zero approvals are required. Treat an
+                // MR as approved only when someone has actually approved it.
+                approved: !n.approved_by.nodes.is_empty(),
                 draft: n.draft,
                 notes_count: n.user_notes_count,
                 last_note_author: last_human
