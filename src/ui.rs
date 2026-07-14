@@ -11,6 +11,11 @@ use ratatui::{
 /// Secondary text on the second line of two-line MR rows (author, last comment).
 const MR_SECONDARY: Color = Color::DarkGray;
 
+// Nerd Font glyphs (Font Awesome set): check, times, refresh.
+const NF_CHECK: &str = "\u{f00c}";
+const NF_TIMES: &str = "\u{f00d}";
+const NF_REFRESH: &str = "\u{f021}";
+
 use crate::app::App;
 use crate::gitlab::{CiStatus, MergeRequest};
 use crate::selector::DisplayRow;
@@ -236,9 +241,9 @@ fn build_row(mr: &MergeRequest, selected: bool) -> Row<'static> {
 
     // CI cell.
     let (ci_text, ci_color) = match &mr.ci {
-        CiStatus::Pass => ("pass".to_string(), Color::Green),
-        CiStatus::Fail => ("fail".to_string(), Color::Red),
-        CiStatus::InProgress => ("in progress".to_string(), Color::Yellow),
+        CiStatus::Pass => (NF_CHECK.to_string(), Color::Green),
+        CiStatus::Fail => (NF_TIMES.to_string(), Color::Red),
+        CiStatus::InProgress => (NF_REFRESH.to_string(), Color::Yellow),
         CiStatus::Other(s) => (s.to_lowercase(), Color::Gray),
         CiStatus::None => ("-".to_string(), Color::Gray),
     };
