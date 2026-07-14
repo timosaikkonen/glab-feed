@@ -11,13 +11,24 @@ use ratatui::{
 /// Secondary text on the second line of two-line MR rows (author, last comment).
 const MR_SECONDARY: Color = Color::DarkGray;
 
-// Nerd Font glyphs (Font Awesome set): check, times, refresh.
+// Nerd Font glyphs (Font Awesome set): check, times, refresh, build, note, push.
 const NF_CHECK: &str = "\u{f00c}";
 const NF_TIMES: &str = "\u{f00d}";
 const NF_REFRESH: &str = "\u{f021}";
+const NF_BUILD: &str = "\u{f085}";
+const NF_NOTE: &str = "\u{f075}";
+const NF_PUSH: &str = "\u{f126}";
+
+fn update_activity_glyph(activity: UpdateActivity) -> &'static str {
+    match activity {
+        UpdateActivity::Build => NF_BUILD,
+        UpdateActivity::Note => NF_NOTE,
+        UpdateActivity::Push => NF_PUSH,
+    }
+}
 
 use crate::app::App;
-use crate::gitlab::{CiStatus, MergeRequest};
+use crate::gitlab::{CiStatus, MergeRequest, UpdateActivity};
 use crate::selector::DisplayRow;
 
 pub fn render(f: &mut Frame, app: &mut App) {
@@ -152,6 +163,7 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         Cell::from("Status"),
         Cell::from("CI"),
         Cell::from("Age"),
+        Cell::from("Updated"),
     ])
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
@@ -165,11 +177,12 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     drop(mrs); // Row owns its content; release the immutable borrow on `app`.
 
     let widths = [
-        Constraint::Percentage(50),
-        Constraint::Percentage(25),
+        Constraint::Percentage(45),
+        Constraint::Percentage(18),
         Constraint::Length(10),
-        Constraint::Length(12),
+        Constraint::Length(4),
         Constraint::Length(14),
+        Constraint::Length(18),
     ];
 
     let table = Table::new(rows, widths)
@@ -259,7 +272,32 @@ fn build_row(mr: &MergeRequest, selected: bool) -> Row<'static> {
         Style::default().fg(Color::Gray),
     ))]));
 
-    Row::new(vec![title_cell, comments_cell, status_cell, ci_cell, age_cell]).height(2)
+    // Updated cell: humanized time + latest activity author underneath.
+    let updated = HumanTime::from(mr.updated_at - Utc::now()).to_string();
+    let mut updated_lines = vec![Line::from(Span::styled(
+        updated,
+        Style::default().fg(Color::Gray),
+    ))];
+    if let Some((activity, user)) = &mr.last_update {
+        // Nerd Font icons are often two cells wide; pad with an extra space so the
+        // gap before @username actually renders.
+        updated_lines.push(Line::from(vec![
+            Span::styled(update_activity_glyph(*activity), secondary),
+            Span::styled("  ", secondary),
+            Span::styled(user.clone(), secondary),
+        ]));
+    }
+    let updated_cell = Cell::from(Text::from(updated_lines));
+
+    Row::new(vec![
+        title_cell,
+        comments_cell,
+        status_cell,
+        ci_cell,
+        age_cell,
+        updated_cell,
+    ])
+    .height(2)
 }
 
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {

@@ -18,6 +18,15 @@ pub struct MergeRequest {
     pub ci: CiStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Latest activity among pipeline run, human note, or commit push.
+    pub last_update: Option<(UpdateActivity, String)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateActivity {
+    Build,
+    Note,
+    Push,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,7 +63,8 @@ query($fullPath: ID!) {
         approvedBy { nodes { username } }
         userNotesCount
         notes(last: 30) { nodes { author { username } createdAt system } }
-        headPipeline { status }
+        headPipeline { status user { username } createdAt }
+        commits(last: 1) { nodes { author { username } committedDate } }
       }
     }
   }
@@ -110,6 +120,7 @@ struct MrNode {
     notes: NoteConnection,
     #[serde(rename = "headPipeline")]
     head_pipeline: Option<Pipeline>,
+    commits: CommitConnection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -140,6 +151,21 @@ struct NoteNode {
 #[derive(Debug, Deserialize)]
 struct Pipeline {
     status: Option<String>,
+    user: Option<UserRef>,
+    #[serde(rename = "createdAt")]
+    created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitConnection {
+    nodes: Vec<CommitNode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitNode {
+    author: Option<UserRef>,
+    #[serde(rename = "committedDate")]
+    committed_date: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +210,53 @@ async fn run_graphql<T: for<'de> Deserialize<'de>>(
     }
 
     resp.data.context("GraphQL response missing `data`")
+}
+
+/// Pick the most recent among pipeline run, human note, and latest commit.
+fn latest_update(
+    pipeline: &Option<Pipeline>,
+    last_human: Option<&NoteNode>,
+    last_commit: Option<&CommitNode>,
+) -> Option<(UpdateActivity, String)> {
+    let mut best: Option<(UpdateActivity, String, DateTime<Utc>)> = None;
+
+    if let Some(p) = pipeline {
+        if let (Some(user), Some(at)) = (&p.user, p.created_at) {
+            best = later(best, (UpdateActivity::Build, user.username.clone(), at));
+        }
+    }
+    if let Some(note) = last_human {
+        if let Some(author) = &note.author {
+            best = later(
+                best,
+                (UpdateActivity::Note, author.username.clone(), note.created_at),
+            );
+        }
+    }
+    if let Some(commit) = last_commit {
+        if let Some(author) = &commit.author {
+            best = later(
+                best,
+                (
+                    UpdateActivity::Push,
+                    author.username.clone(),
+                    commit.committed_date,
+                ),
+            );
+        }
+    }
+
+    best.map(|(kind, user, _)| (kind, user))
+}
+
+fn later(
+    current: Option<(UpdateActivity, String, DateTime<Utc>)>,
+    candidate: (UpdateActivity, String, DateTime<Utc>),
+) -> Option<(UpdateActivity, String, DateTime<Utc>)> {
+    Some(match current {
+        Some(prev) if prev.2 >= candidate.2 => prev,
+        _ => candidate,
+    })
 }
 
 /// Fetch the authenticated user's username (used for the mine-only filter).
@@ -238,6 +311,11 @@ pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<Mer
                 ),
                 created_at: n.created_at,
                 updated_at: n.updated_at,
+                last_update: latest_update(
+                    &n.head_pipeline,
+                    last_human,
+                    n.commits.nodes.first(),
+                ),
             }
         })
         .collect::<Vec<_>>();
