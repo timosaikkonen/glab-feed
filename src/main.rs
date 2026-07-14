@@ -235,9 +235,29 @@ fn handle_url_key(app: &mut App, key: KeyEvent, channels: &Channels) {
 }
 
 fn handle_selector_key(app: &mut App, key: KeyEvent, channels: &Channels) {
+    // Search-input mode captures typing; only Ctrl-C still quits.
+    if app.selector.as_ref().is_some_and(|s| s.search_active) {
+        if let Some(sel) = app.selector.as_mut() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+                (KeyCode::Enter, _) => sel.exit_search(false),
+                (KeyCode::Esc, _) => sel.exit_search(true),
+                (KeyCode::Backspace, _) => sel.backspace_query(),
+                (KeyCode::Char(c), _) => sel.push_query_char(c),
+                _ => {}
+            }
+        }
+        return;
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
         (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => app.close_selector(),
+        (KeyCode::Char('/'), _) => {
+            if let Some(sel) = app.selector.as_mut() {
+                sel.enter_search();
+            }
+        }
         (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
             if let Some(sel) = app.selector.as_mut() {
                 sel.move_down();

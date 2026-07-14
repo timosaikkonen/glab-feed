@@ -131,6 +131,9 @@ pub struct RepoSelector {
     pub projects: Vec<Project>,
     pub selected: HashSet<String>,
     pub cursor: usize,
+    /// Incremental name filter over `projects`.
+    pub query: String,
+    pub search_active: bool,
 }
 
 impl RepoSelector {
@@ -142,6 +145,8 @@ impl RepoSelector {
             projects: Vec::new(),
             selected,
             cursor: 0,
+            query: String::new(),
+            search_active: false,
         }
     }
 
@@ -150,9 +155,7 @@ impl RepoSelector {
         self.projects = projects;
         self.loading = false;
         self.error = None;
-        if self.cursor >= self.projects.len() {
-            self.cursor = self.projects.len().saturating_sub(1);
-        }
+        self.cursor = 0;
     }
 
     pub fn set_error(&mut self, err: String) {
@@ -162,18 +165,55 @@ impl RepoSelector {
         self.cursor = 0;
     }
 
+    /// Projects matching the current query (case-insensitive substring of the
+    /// full path), or all projects when the query is empty.
+    pub fn visible(&self) -> Vec<&Project> {
+        if self.query.is_empty() {
+            return self.projects.iter().collect();
+        }
+        let needle = self.query.to_lowercase();
+        self.projects
+            .iter()
+            .filter(|p| p.path_with_namespace.to_lowercase().contains(&needle))
+            .collect()
+    }
+
+    // ----- Search input -----
+
+    pub fn enter_search(&mut self) {
+        self.search_active = true;
+    }
+
+    pub fn exit_search(&mut self, clear: bool) {
+        self.search_active = false;
+        if clear {
+            self.query.clear();
+            self.cursor = 0;
+        }
+    }
+
+    pub fn push_query_char(&mut self, c: char) {
+        self.query.push(c);
+        self.cursor = 0;
+    }
+
+    pub fn backspace_query(&mut self) {
+        self.query.pop();
+        self.cursor = 0;
+    }
+
     pub fn move_up(&mut self) {
         self.cursor = self.cursor.saturating_sub(1);
     }
 
     pub fn move_down(&mut self) {
-        if self.cursor + 1 < self.projects.len() {
+        if self.cursor + 1 < self.visible().len() {
             self.cursor += 1;
         }
     }
 
     fn cursor_project(&self) -> Option<&Project> {
-        self.projects.get(self.cursor)
+        self.visible().get(self.cursor).copied()
     }
 
     pub fn toggle(&mut self) {
@@ -186,11 +226,11 @@ impl RepoSelector {
     }
 
     /// Grouped display rows: a group header whenever the namespace changes,
-    /// followed by its projects.
+    /// followed by its projects. Operates on the filtered (visible) subset.
     pub fn rows(&self) -> Vec<DisplayRow<'_>> {
         let mut rows = Vec::new();
         let mut current_group: Option<&str> = None;
-        for (i, p) in self.projects.iter().enumerate() {
+        for (i, p) in self.visible().into_iter().enumerate() {
             if current_group != Some(p.namespace_full_path.as_str()) {
                 current_group = Some(p.namespace_full_path.as_str());
                 rows.push(DisplayRow::Group(p.namespace_full_path.as_str()));

@@ -282,14 +282,15 @@ fn render_selector(f: &mut Frame, app: &App) {
     f.render_widget(Clear, area);
 
     let title = format!(
-        " Select repos  |  filter: {}  ({} selected) ",
+        " Select repos  |  filter: {}  ({} selected, {} shown) ",
         sel.filter.label(),
-        sel.selected.len()
+        sel.selected.len(),
+        sel.visible().len(),
     );
     let block = Block::default()
         .borders(Borders::ALL)
         .title(title)
-        .title_bottom(" Space toggle  Tab filter  Enter save  Esc cancel ")
+        .title_bottom(" Space toggle  Tab filter  / search  Enter save  Esc cancel ")
         .padding(Padding::horizontal(1));
 
     let inner = block.inner(area);
@@ -307,6 +308,19 @@ fn render_selector(f: &mut Frame, app: &App) {
         f.render_widget(
             Paragraph::new("No projects for this filter.").dim(),
             inner,
+        );
+        return;
+    }
+
+    // Split: search box on top, list below.
+    let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    render_search_box(f, sel, parts[0]);
+    let list_area = parts[1];
+
+    if sel.visible().is_empty() {
+        f.render_widget(
+            Paragraph::new(format!("No matches for \"{}\".", sel.query)).dim(),
+            list_area,
         );
         return;
     }
@@ -354,5 +368,29 @@ fn render_selector(f: &mut Frame, app: &App) {
         .highlight_symbol("> ");
     let mut state = ratatui::widgets::ListState::default();
     state.select(Some(cursor_idx));
-    f.render_stateful_widget(list, inner, &mut state);
+    f.render_stateful_widget(list, list_area, &mut state);
+}
+
+fn render_search_box(f: &mut Frame, sel: &crate::selector::RepoSelector, area: Rect) {
+    let line = if sel.search_active {
+        Line::from(vec![
+            Span::styled("/ ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                sel.query.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("_", Style::default().fg(Color::Cyan)),
+        ])
+    } else if !sel.query.is_empty() {
+        Line::from(Span::styled(
+            format!("/ {}", sel.query),
+            Style::default().fg(Color::Gray),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "/ to search by name",
+            Style::default().fg(Color::DarkGray),
+        ))
+    };
+    f.render_widget(Paragraph::new(line), area);
 }
