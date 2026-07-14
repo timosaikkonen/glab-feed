@@ -1,12 +1,15 @@
 use chrono::Utc;
 use chrono_humanize::HumanTime;
 use ratatui::{
-    layout::{Constraint, Flex, Layout, Rect},
+    layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
     widgets::{Block, Borders, Cell, Clear, List, ListItem, Padding, Paragraph, Row, Table, Tabs},
     Frame,
 };
+
+/// Secondary text on the second line of two-line MR rows (author, last comment).
+const MR_SECONDARY: Color = Color::DarkGray;
 
 use crate::app::App;
 use crate::gitlab::{CiStatus, MergeRequest};
@@ -148,7 +151,12 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     .style(Style::default().add_modifier(Modifier::BOLD))
     .height(1);
 
-    let rows: Vec<Row> = mrs.iter().map(|mr| build_row(mr)).collect();
+    let selected = app.table_state.selected();
+    let rows: Vec<Row> = mrs
+        .iter()
+        .enumerate()
+        .map(|(i, mr)| build_row(mr, selected == Some(i)))
+        .collect();
     drop(mrs); // Row owns its content; release the immutable borrow on `app`.
 
     let widths = [
@@ -172,7 +180,20 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(table, area, &mut app.table_state);
 }
 
-fn build_row(mr: &MergeRequest) -> Row<'static> {
+fn mr_title_style() -> Style {
+    Style::default().add_modifier(Modifier::BOLD)
+}
+
+fn mr_secondary_style(selected: bool) -> Style {
+    if selected {
+        mr_title_style()
+    } else {
+        Style::default().fg(MR_SECONDARY)
+    }
+}
+
+fn build_row(mr: &MergeRequest, selected: bool) -> Row<'static> {
+    let secondary = mr_secondary_style(selected);
     // Title cell: title + author underneath.
     let author = if mr.author_name.is_empty() {
         format!("@{}", mr.author_username)
@@ -182,9 +203,9 @@ fn build_row(mr: &MergeRequest) -> Row<'static> {
     let title_cell = Cell::from(Text::from(vec![
         Line::from(Span::styled(
             format!("!{} {}", mr.iid, mr.title),
-            Style::default().add_modifier(Modifier::BOLD),
+            mr_title_style(),
         )),
-        Line::from(Span::styled(author, Style::default().fg(Color::Gray))),
+        Line::from(Span::styled(author, secondary)),
     ]));
 
     // Comments cell: count + last commenter/time.
@@ -197,7 +218,7 @@ fn build_row(mr: &MergeRequest) -> Row<'static> {
     };
     let comments_cell = Cell::from(Text::from(vec![
         Line::from(format!("{}", mr.notes_count)),
-        Line::from(Span::styled(second, Style::default().fg(Color::Gray))),
+        Line::from(Span::styled(second, secondary)),
     ]));
 
     // Status cell.
@@ -240,29 +261,31 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let secs = app.seconds_to_next_poll();
     let mine = if app.mine_only { "mine" } else { "all" };
 
-    let status_line = Line::from(vec![
-        Span::styled(
-            format!(" next poll in {secs:>2}s "),
-            Style::default().fg(Color::Black).bg(Color::Cyan),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            format!("filter: {mine}"),
-            Style::default().fg(if app.mine_only {
-                Color::Green
-            } else {
-                Color::Gray
-            }),
-        ),
-    ]);
+    let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
+    let status_cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(18)]).split(rows[0]);
 
-    let keys = Line::from(Span::styled(
+    let filter = Paragraph::new(Line::from(Span::styled(
+        format!("filter: {mine}"),
+        Style::default().fg(if app.mine_only {
+            Color::Green
+        } else {
+            Color::Gray
+        }),
+    )));
+    f.render_widget(filter, status_cols[0]);
+
+    let poll = Paragraph::new(Line::from(Span::styled(
+        format!("next poll in {secs:>2}s"),
+        Style::default().fg(Color::Black).bg(Color::Cyan),
+    )))
+    .alignment(Alignment::Right);
+    f.render_widget(poll, status_cols[1]);
+
+    let keys = Paragraph::new(Line::from(Span::styled(
         " [Tab/←→] repo  [↑↓] select  [m] mine  [Enter] open  [c] copy url  [C] copy id  [s] repos  [r] refresh  [q] quit",
         Style::default().fg(Color::DarkGray),
-    ));
-
-    let p = Paragraph::new(Text::from(vec![status_line, keys]));
-    f.render_widget(p, area);
+    )));
+    f.render_widget(keys, rows[1]);
 }
 
 fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
