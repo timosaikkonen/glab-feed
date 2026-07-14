@@ -12,7 +12,7 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyM
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use app::{App, SelectorUpdate};
+use app::{App, PollEvent, SelectorUpdate};
 use config::RepoCfg;
 use selector::RepoFilter;
 
@@ -92,7 +92,7 @@ async fn main() -> Result<()> {
 async fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
-    updates: &mut mpsc::Receiver<app::PollUpdate>,
+    updates: &mut mpsc::Receiver<PollEvent>,
     selector_res_rx: &mut mpsc::Receiver<SelectorUpdate>,
     user_res_rx: &mut mpsc::Receiver<String>,
     channels: &Channels,
@@ -107,9 +107,12 @@ async fn run(
             // Redraw once a second so the countdown stays live.
             _ = tick.tick() => {}
 
-            // Fresh MR data from the poller.
-            Some(update) = updates.recv() => {
-                app.apply_update(update);
+            // Poll lifecycle from the poller.
+            Some(event) = updates.recv() => {
+                match event {
+                    PollEvent::Started => app.handle_poll_started(),
+                    PollEvent::Finished(update) => app.handle_poll_finished(update),
+                }
             }
 
             // Projects list for the repo selector.

@@ -258,11 +258,10 @@ fn build_row(mr: &MergeRequest, selected: bool) -> Row<'static> {
 }
 
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
-    let secs = app.seconds_to_next_poll();
     let mine = if app.mine_only { "mine" } else { "all" };
 
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
-    let status_cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(18)]).split(rows[0]);
+    let status_cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).split(rows[0]);
 
     let filter = Paragraph::new(Line::from(Span::styled(
         format!("filter: {mine}"),
@@ -274,10 +273,23 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     )));
     f.render_widget(filter, status_cols[0]);
 
-    let poll = Paragraph::new(Line::from(Span::styled(
-        format!("next poll in {secs:>2}s"),
-        Style::default().fg(Color::Black).bg(Color::Cyan),
-    )))
+    let poll = if app.fetching {
+        Paragraph::new(Line::from(Span::styled(
+            "Fetching",
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        )))
+    } else if let Some(err) = &app.poll_error {
+        Paragraph::new(Line::from(Span::styled(
+            err.clone(),
+            Style::default().fg(Color::White).bg(Color::Red),
+        )))
+    } else {
+        let secs = app.seconds_to_next_poll();
+        Paragraph::new(Line::from(Span::styled(
+            format!("next poll in {secs:>2}s"),
+            Style::default().fg(Color::Black).bg(Color::Cyan),
+        )))
+    }
     .alignment(Alignment::Right);
     f.render_widget(poll, status_cols[1]);
 

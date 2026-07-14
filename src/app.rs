@@ -33,6 +33,13 @@ pub struct PollUpdate {
     pub results: Vec<(String, FetchResult)>,
 }
 
+/// Lifecycle events from the background poller.
+#[derive(Debug)]
+pub enum PollEvent {
+    Started,
+    Finished(PollUpdate),
+}
+
 /// A projects fetch result for the repo selector, tagged with its filter so
 /// stale responses can be discarded.
 #[derive(Debug)]
@@ -50,6 +57,9 @@ pub struct App {
     pub mine_only: bool,
     pub current_user: String,
     pub next_poll: Instant,
+    pub fetching: bool,
+    /// Summary error from the most recent poll cycle (any repo failures).
+    pub poll_error: Option<String>,
     pub should_quit: bool,
     pub selector: Option<RepoSelector>,
     /// First-run setup: awaiting a GitLab remote URL entry.
@@ -74,6 +84,8 @@ impl App {
             mine_only: false,
             current_user,
             next_poll: Instant::now() + POLL_INTERVAL,
+            fetching: true,
+            poll_error: None,
             should_quit: false,
             selector: None,
             awaiting_url: false,
@@ -144,10 +156,18 @@ impl App {
             .as_secs()
     }
 
-    pub fn apply_update(&mut self, update: PollUpdate) {
+    pub fn handle_poll_started(&mut self) {
+        self.fetching = true;
+        self.poll_error = None;
+    }
+
+    pub fn handle_poll_finished(&mut self, update: PollUpdate) {
+        let mut failures = 0;
+        let mut total = 0;
         for (path, result) in update.results.into_iter() {
+            total += 1;
             let Some(idx) = self.repos.iter().position(|r| r.path == path) else {
-                continue; // stale result for a repo no longer configured
+                continue;
             };
             if let Some(state) = self.repo_states.get_mut(idx) {
                 state.loaded = true;
@@ -156,11 +176,24 @@ impl App {
                         state.mrs = mrs;
                         state.error = None;
                     }
-                    Err(e) => state.error = Some(e),
+                    Err(e) => {
+                        failures += 1;
+                        state.error = Some(e);
+                    }
                 }
             }
         }
+        self.fetching = false;
         self.next_poll = Instant::now() + POLL_INTERVAL;
+        self.poll_error = if failures > 0 {
+            Some(if failures == total {
+                "Fetch failed".to_string()
+            } else {
+                format!("Fetch failed ({failures})")
+            })
+        } else {
+            None
+        };
         self.clamp_selection();
     }
 

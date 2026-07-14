@@ -1,6 +1,6 @@
 use tokio::sync::mpsc;
 
-use crate::app::{FetchResult, PollUpdate, POLL_INTERVAL};
+use crate::app::{FetchResult, PollEvent, PollUpdate, POLL_INTERVAL};
 use crate::config::RepoCfg;
 use crate::gitlab;
 
@@ -16,8 +16,8 @@ pub fn spawn(
     initial_repos: Vec<RepoCfg>,
     mut refresh_rx: mpsc::Receiver<()>,
     mut reconfigure_rx: mpsc::Receiver<(String, Vec<RepoCfg>)>,
-) -> mpsc::Receiver<PollUpdate> {
-    let (tx, rx) = mpsc::channel::<PollUpdate>(8);
+) -> mpsc::Receiver<PollEvent> {
+    let (tx, rx) = mpsc::channel::<PollEvent>(8);
 
     tokio::spawn(async move {
         let mut host = initial_host;
@@ -44,8 +44,11 @@ pub fn spawn(
                 }
             }
 
+            if tx.send(PollEvent::Started).await.is_err() {
+                break;
+            }
             let update = poll_all(&host, &repos).await;
-            if tx.send(update).await.is_err() {
+            if tx.send(PollEvent::Finished(update)).await.is_err() {
                 break; // app gone
             }
         }
