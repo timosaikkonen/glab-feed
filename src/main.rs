@@ -1,0 +1,294 @@
+mod app;
+mod config;
+mod gitlab;
+mod poller;
+mod selector;
+mod ui;
+
+use std::time::Duration;
+
+use anyhow::Result;
+use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use futures::StreamExt;
+use tokio::sync::mpsc;
+
+use app::{App, SelectorUpdate};
+use config::RepoCfg;
+use selector::RepoFilter;
+
+/// Shared channels the event loop needs when handling keys.
+struct Channels {
+    refresh_tx: mpsc::Sender<()>,
+    reconfigure_tx: mpsc::Sender<(String, Vec<RepoCfg>)>,
+    selector_res_tx: mpsc::Sender<SelectorUpdate>,
+    user_res_tx: mpsc::Sender<String>,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Missing config -> first-run setup inside the TUI. A present-but-invalid
+    // config is a hard error.
+    let cfg = if config::config_path().exists() {
+        match config::load() {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
+    let host = cfg.as_ref().map(|c| c.host.clone()).unwrap_or_default();
+    let repos = cfg.as_ref().map(|c| c.repos.clone()).unwrap_or_default();
+
+    let current_user = if host.is_empty() {
+        String::new()
+    } else {
+        gitlab::fetch_current_user(&host).await.unwrap_or_else(|e| {
+            eprintln!("warning: could not determine current user: {e}");
+            String::new()
+        })
+    };
+
+    let mut app = App::new(host.clone(), repos.clone(), current_user);
+    if cfg.is_none() {
+        app.start_setup();
+    }
+
+    let (refresh_tx, refresh_rx) = mpsc::channel::<()>(1);
+    let (reconfigure_tx, reconfigure_rx) = mpsc::channel::<(String, Vec<RepoCfg>)>(1);
+    let (selector_res_tx, mut selector_res_rx) = mpsc::channel::<SelectorUpdate>(4);
+    let (user_res_tx, mut user_res_rx) = mpsc::channel::<String>(1);
+    let mut updates = poller::spawn(host, repos, refresh_rx, reconfigure_rx);
+
+    let channels = Channels {
+        refresh_tx,
+        reconfigure_tx,
+        selector_res_tx,
+        user_res_tx,
+    };
+
+    let mut terminal = ratatui::init();
+    let result = run(
+        &mut terminal,
+        &mut app,
+        &mut updates,
+        &mut selector_res_rx,
+        &mut user_res_rx,
+        &channels,
+    )
+    .await;
+    ratatui::restore();
+
+    if let Some(err) = app.fatal_error {
+        eprintln!("{err}");
+        std::process::exit(1);
+    }
+    result
+}
+
+async fn run(
+    terminal: &mut ratatui::DefaultTerminal,
+    app: &mut App,
+    updates: &mut mpsc::Receiver<app::PollUpdate>,
+    selector_res_rx: &mut mpsc::Receiver<SelectorUpdate>,
+    user_res_rx: &mut mpsc::Receiver<String>,
+    channels: &Channels,
+) -> Result<()> {
+    let mut events = EventStream::new();
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+
+    terminal.draw(|f| ui::render(f, app))?;
+
+    loop {
+        tokio::select! {
+            // Redraw once a second so the countdown stays live.
+            _ = tick.tick() => {}
+
+            // Fresh MR data from the poller.
+            Some(update) = updates.recv() => {
+                app.apply_update(update);
+            }
+
+            // Projects list for the repo selector.
+            Some(update) = selector_res_rx.recv() => {
+                app.apply_selector_update(update);
+            }
+
+            // Current user resolved after first-run URL entry.
+            Some(user) = user_res_rx.recv() => {
+                app.set_current_user(user);
+            }
+
+            // Terminal input.
+            maybe_event = events.next() => {
+                match maybe_event {
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        handle_key(app, key, channels);
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(_)) | None => break,
+                }
+            }
+        }
+
+        if app.should_quit {
+            break;
+        }
+        terminal.draw(|f| ui::render(f, app))?;
+    }
+
+    Ok(())
+}
+
+fn copy_to_clipboard(text: &str) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(text.to_string());
+    }
+}
+
+/// Spawn a background task fetching projects for `filter`.
+fn spawn_project_fetch(host: String, filter: RepoFilter, tx: mpsc::Sender<SelectorUpdate>) {
+    tokio::spawn(async move {
+        let result = selector::fetch_projects(&host, filter)
+            .await
+            .map_err(|e| e.to_string());
+        let _ = tx.send(SelectorUpdate { filter, result }).await;
+    });
+}
+
+/// Spawn a background task resolving the current user for `host`.
+fn spawn_user_fetch(host: String, tx: mpsc::Sender<String>) {
+    tokio::spawn(async move {
+        if let Ok(user) = gitlab::fetch_current_user(&host).await {
+            let _ = tx.send(user).await;
+        }
+    });
+}
+
+fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
+    if app.awaiting_url {
+        handle_url_key(app, key, channels);
+        return;
+    }
+    if app.selector.is_some() {
+        handle_selector_key(app, key, channels);
+        return;
+    }
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+        (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => app.should_quit = true,
+        (KeyCode::Tab, _) | (KeyCode::Right, _) => app.next_tab(),
+        (KeyCode::BackTab, _) | (KeyCode::Left, _) => app.prev_tab(),
+        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.select_next(),
+        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.select_prev(),
+        (KeyCode::Char('m'), _) => app.toggle_mine(),
+        (KeyCode::Char('r'), _) => {
+            let _ = channels.refresh_tx.try_send(());
+        }
+        (KeyCode::Char('s'), _) => {
+            app.open_selector();
+            if let Some(sel) = app.selector.as_ref() {
+                spawn_project_fetch(app.host.clone(), sel.filter, channels.selector_res_tx.clone());
+            }
+        }
+        (KeyCode::Enter, _) => {
+            if let Some(url) = app.selected_url() {
+                let _ = open::that_detached(url);
+            }
+        }
+        (KeyCode::Char('c'), _) => {
+            if let Some(url) = app.selected_url() {
+                copy_to_clipboard(&url);
+            }
+        }
+        (KeyCode::Char('C'), _) => {
+            if let Some(id) = app.selected_id() {
+                copy_to_clipboard(&id);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_url_key(app: &mut App, key: KeyEvent, channels: &Channels) {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+        (KeyCode::Esc, _) => app.should_quit = true,
+        (KeyCode::Backspace, _) => app.backspace_url(),
+        (KeyCode::Char(c), _) => app.push_url_char(c),
+        (KeyCode::Enter, _) => {
+            if let Some(host) = app.submit_url() {
+                // Resolve the user and open the selector to pick repos.
+                spawn_user_fetch(host.clone(), channels.user_res_tx.clone());
+                app.open_selector();
+                if let Some(sel) = app.selector.as_ref() {
+                    spawn_project_fetch(host, sel.filter, channels.selector_res_tx.clone());
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_selector_key(app: &mut App, key: KeyEvent, channels: &Channels) {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => app.close_selector(),
+        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+            if let Some(sel) = app.selector.as_mut() {
+                sel.move_down();
+            }
+        }
+        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+            if let Some(sel) = app.selector.as_mut() {
+                sel.move_up();
+            }
+        }
+        (KeyCode::Char(' '), _) => {
+            if let Some(sel) = app.selector.as_mut() {
+                sel.toggle();
+            }
+        }
+        (KeyCode::Tab, _) => {
+            if let Some(sel) = app.selector.as_mut() {
+                sel.filter = sel.filter.next();
+                sel.loading = true;
+                sel.error = None;
+                let filter = sel.filter;
+                spawn_project_fetch(app.host.clone(), filter, channels.selector_res_tx.clone());
+            }
+        }
+        (KeyCode::Enter, _) => {
+            let cfgs = app
+                .selector
+                .as_ref()
+                .map(|s| s.to_repo_cfgs())
+                .unwrap_or_default();
+            if cfgs.is_empty() {
+                if let Some(sel) = app.selector.as_mut() {
+                    sel.error = Some("Select at least one repo before saving.".to_string());
+                }
+                return;
+            }
+            let cfg = config::Config {
+                host: app.host.clone(),
+                repos: cfgs.clone(),
+            };
+            if let Err(e) = config::save(&cfg) {
+                if let Some(sel) = app.selector.as_mut() {
+                    sel.error = Some(format!("Save failed: {e}"));
+                }
+                return;
+            }
+            app.first_run = false;
+            app.set_repos(cfgs.clone());
+            let _ = channels.reconfigure_tx.try_send((app.host.clone(), cfgs));
+            app.close_selector();
+        }
+        _ => {}
+    }
+}
