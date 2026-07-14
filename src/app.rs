@@ -73,6 +73,7 @@ pub struct App {
     /// Incremental filter on MR title / IID in the main table.
     pub mr_query: String,
     pub mr_search_active: bool,
+    pub show_help: bool,
 }
 
 impl App {
@@ -98,6 +99,7 @@ impl App {
             fatal_error: None,
             mr_query: String::new(),
             mr_search_active: false,
+            show_help: false,
         }
     }
 
@@ -302,6 +304,38 @@ impl App {
             self.selected_tab = (self.selected_tab + self.repos.len() - 1) % self.repos.len();
             self.reset_selection();
         }
+    }
+
+    /// Move the current tab one position left and persist the new order.
+    pub fn move_tab_left(&mut self) {
+        if self.selected_tab == 0 || self.repos.is_empty() {
+            return;
+        }
+        let i = self.selected_tab;
+        self.repos.swap(i, i - 1);
+        self.repo_states.swap(i, i - 1);
+        self.selected_tab -= 1;
+        self.persist_repo_order();
+    }
+
+    /// Move the current tab one position right and persist the new order.
+    pub fn move_tab_right(&mut self) {
+        if self.selected_tab + 1 >= self.repos.len() {
+            return;
+        }
+        let i = self.selected_tab;
+        self.repos.swap(i, i + 1);
+        self.repo_states.swap(i, i + 1);
+        self.selected_tab += 1;
+        self.persist_repo_order();
+    }
+
+    fn persist_repo_order(&self) {
+        let cfg = crate::config::Config {
+            host: self.host.clone(),
+            repos: self.repos.clone(),
+        };
+        let _ = crate::config::save(&cfg);
     }
 
     pub fn select_next(&mut self) {

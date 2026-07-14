@@ -49,6 +49,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_url_prompt(f, app);
     } else if app.selector.is_some() {
         render_selector(f, app);
+    } else if app.show_help {
+        render_help(f);
     }
 }
 
@@ -365,10 +367,34 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(poll, status_cols[1]);
 
     let keys = Paragraph::new(Line::from(Span::styled(
-        " [Tab/←→] repo  [↑↓] select  [m] mine  [/] filter  [Enter] open  [c] copy url  [C] copy id  [s] repos  [r] refresh  [q] quit",
+        " [Tab/←→] repo  [↑↓] select  [/] filter  [Enter] open  [r] refresh  [?] help  [q] quit",
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(keys, rows[1]);
+}
+
+fn render_help(f: &mut Frame) {
+    let area = centered_rect(f.area(), 50, 50);
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Hotkeys ")
+        .title_bottom(" ? / Esc close ")
+        .padding(Padding::new(2, 2, 1, 1));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let lines = Text::from(vec![
+        Line::from(Span::styled("More hotkeys", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from("  H / L        reorder tab left / right"),
+        Line::from("  m            toggle mine-only filter"),
+        Line::from("  c            copy MR URL to clipboard"),
+        Line::from("  C            copy MR reference (e.g. !2191)"),
+        Line::from("  s            open repo selector"),
+    ]);
+    f.render_widget(Paragraph::new(lines), inner);
 }
 
 fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {

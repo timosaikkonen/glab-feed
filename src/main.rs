@@ -184,12 +184,18 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
         handle_mr_search_key(app, key);
         return;
     }
+    if app.show_help {
+        handle_help_key(app, key);
+        return;
+    }
 
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
         (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => app.should_quit = true,
         (KeyCode::Tab, _) | (KeyCode::Right, _) => app.next_tab(),
         (KeyCode::BackTab, _) | (KeyCode::Left, _) => app.prev_tab(),
+        (KeyCode::Char('H'), _) => app.move_tab_left(),
+        (KeyCode::Char('L'), _) => app.move_tab_right(),
         (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.select_next(),
         (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.select_prev(),
         (KeyCode::Char('m'), _) => app.toggle_mine(),
@@ -218,6 +224,15 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
             }
         }
         (KeyCode::Char('/'), _) => app.enter_mr_search(),
+        (KeyCode::Char('?'), _) => app.show_help = true,
+        _ => {}
+    }
+}
+
+fn handle_help_key(app: &mut App, key: KeyEvent) {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+        (KeyCode::Esc, _) | (KeyCode::Char('?'), _) => app.show_help = false,
         _ => {}
     }
 }
