@@ -70,6 +70,9 @@ pub struct App {
     pub first_run: bool,
     /// If set, the app should quit and print this error to stderr.
     pub fatal_error: Option<String>,
+    /// Incremental filter on MR title / IID in the main table.
+    pub mr_query: String,
+    pub mr_search_active: bool,
 }
 
 impl App {
@@ -93,6 +96,8 @@ impl App {
             url_error: None,
             first_run: false,
             fatal_error: None,
+            mr_query: String::new(),
+            mr_search_active: false,
         }
     }
 
@@ -134,7 +139,7 @@ impl App {
         self.current_user = user;
     }
 
-    /// MRs for the current tab, with the mine-only filter applied.
+    /// MRs for the current tab, with mine-only and title/IID filters applied.
     pub fn visible_mrs(&self) -> Vec<&MergeRequest> {
         let Some(state) = self.repo_states.get(self.selected_tab) else {
             return Vec::new();
@@ -143,7 +148,44 @@ impl App {
             .mrs
             .iter()
             .filter(|mr| !self.mine_only || mr.author_username == self.current_user)
+            .filter(|mr| self.mr_matches_query(mr))
             .collect()
+    }
+
+    fn mr_matches_query(&self, mr: &MergeRequest) -> bool {
+        if self.mr_query.is_empty() {
+            return true;
+        }
+        let q = self
+            .mr_query
+            .trim()
+            .trim_start_matches('!')
+            .to_lowercase();
+        mr.iid.to_lowercase().contains(&q) || mr.title.to_lowercase().contains(&q)
+    }
+
+    // ----- MR list search -----
+
+    pub fn enter_mr_search(&mut self) {
+        self.mr_search_active = true;
+    }
+
+    pub fn exit_mr_search(&mut self, clear: bool) {
+        self.mr_search_active = false;
+        if clear {
+            self.mr_query.clear();
+        }
+        self.reset_selection();
+    }
+
+    pub fn push_mr_query_char(&mut self, c: char) {
+        self.mr_query.push(c);
+        self.reset_selection();
+    }
+
+    pub fn backspace_mr_query(&mut self) {
+        self.mr_query.pop();
+        self.reset_selection();
     }
 
     pub fn current_state(&self) -> Option<&RepoState> {

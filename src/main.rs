@@ -180,6 +180,10 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
         handle_selector_key(app, key, channels);
         return;
     }
+    if app.mr_search_active {
+        handle_mr_search_key(app, key);
+        return;
+    }
 
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
@@ -213,6 +217,18 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
                 copy_to_clipboard(&id);
             }
         }
+        (KeyCode::Char('/'), _) => app.enter_mr_search(),
+        _ => {}
+    }
+}
+
+fn handle_mr_search_key(app: &mut App, key: KeyEvent) {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+        (KeyCode::Enter, _) => app.exit_mr_search(false),
+        (KeyCode::Esc, _) => app.exit_mr_search(true),
+        (KeyCode::Backspace, _) => app.backspace_mr_query(),
+        (KeyCode::Char(c), _) => app.push_mr_query_char(c),
         _ => {}
     }
 }

@@ -34,14 +34,16 @@ use crate::selector::DisplayRow;
 pub fn render(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // tabs
+        Constraint::Length(1), // MR filter
         Constraint::Min(1),    // table
         Constraint::Length(2), // footer
     ])
     .split(f.area());
 
     render_tabs(f, app, chunks[0]);
-    render_table(f, app, chunks[1]);
-    render_footer(f, app, chunks[2]);
+    render_mr_search(f, app, chunks[1]);
+    render_table(f, app, chunks[2]);
+    render_footer(f, app, chunks[3]);
 
     if app.awaiting_url {
         render_url_prompt(f, app);
@@ -147,10 +149,12 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
 
     let mrs = app.visible_mrs();
     if mrs.is_empty() {
-        let msg = if app.mine_only {
-            "No merge requests authored by you here."
+        let msg = if !app.mr_query.is_empty() {
+            format!("No merge requests matching \"{}\".", app.mr_query)
+        } else if app.mine_only {
+            "No merge requests authored by you here.".to_string()
         } else {
-            "No open merge requests."
+            "No open merge requests.".to_string()
         };
         let p = Paragraph::new(msg).dim().block(block);
         f.render_widget(p, area);
@@ -300,6 +304,30 @@ fn build_row(mr: &MergeRequest, selected: bool) -> Row<'static> {
     .height(2)
 }
 
+fn render_mr_search(f: &mut Frame, app: &App, area: Rect) {
+    let line = if app.mr_search_active {
+        Line::from(vec![
+            Span::styled("/ ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                app.mr_query.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("_", Style::default().fg(Color::Cyan)),
+        ])
+    } else if !app.mr_query.is_empty() {
+        Line::from(Span::styled(
+            format!("/ {}  ({} shown)", app.mr_query, app.visible_mrs().len()),
+            Style::default().fg(Color::Gray),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "/ filter by title or IID",
+            Style::default().fg(Color::DarkGray),
+        ))
+    };
+    f.render_widget(Paragraph::new(line), area);
+}
+
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let mine = if app.mine_only { "mine" } else { "all" };
 
@@ -337,7 +365,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(poll, status_cols[1]);
 
     let keys = Paragraph::new(Line::from(Span::styled(
-        " [Tab/←→] repo  [↑↓] select  [m] mine  [Enter] open  [c] copy url  [C] copy id  [s] repos  [r] refresh  [q] quit",
+        " [Tab/←→] repo  [↑↓] select  [m] mine  [/] filter  [Enter] open  [c] copy url  [C] copy id  [s] repos  [r] refresh  [q] quit",
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(keys, rows[1]);
