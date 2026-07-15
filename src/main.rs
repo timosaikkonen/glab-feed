@@ -52,7 +52,12 @@ async fn main() -> Result<()> {
         })
     };
 
-    let mut app = App::new(host.clone(), repos.clone(), current_user);
+    let mut app = App::new(
+        host.clone(),
+        repos.clone(),
+        current_user,
+        cmux_available(),
+    );
     if cfg.is_none() {
         app.start_setup();
     }
@@ -164,6 +169,20 @@ fn copy_to_clipboard(text: &str) -> bool {
     }
 }
 
+fn cmux_available() -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", "command -v cmux >/dev/null 2>&1"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn open_in_cmux(url: &str) {
+    let _ = std::process::Command::new("cmux")
+        .args(["browser", "open", url])
+        .spawn();
+}
+
 /// Spawn a background task fetching projects for `filter`.
 fn spawn_project_fetch(host: String, filter: RepoFilter, tx: mpsc::Sender<SelectorUpdate>) {
     tokio::spawn(async move {
@@ -218,6 +237,11 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
             app.open_selector();
             if let Some(sel) = app.selector.as_ref() {
                 spawn_project_fetch(app.host.clone(), sel.filter, channels.selector_res_tx.clone());
+            }
+        }
+        (KeyCode::Enter, KeyModifiers::ALT) if app.cmux_available => {
+            if let Some(url) = app.selected_url() {
+                open_in_cmux(&url);
             }
         }
         (KeyCode::Enter, _) => {

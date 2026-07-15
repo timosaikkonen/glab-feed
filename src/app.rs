@@ -92,10 +92,17 @@ pub struct App {
     pub show_help: bool,
     /// When set, the footer shows a copy confirmation until this instant.
     pub copied: Option<(CopiedKind, Instant)>,
+    /// Whether `cmux` is on PATH (enables Shift-Enter to open in a split).
+    pub cmux_available: bool,
 }
 
 impl App {
-    pub fn new(host: String, repos: Vec<RepoCfg>, current_user: String) -> Self {
+    pub fn new(
+        host: String,
+        repos: Vec<RepoCfg>,
+        current_user: String,
+        cmux_available: bool,
+    ) -> Self {
         let repo_states = vec![RepoState::default(); repos.len()];
         App {
             host,
@@ -119,6 +126,7 @@ impl App {
             mr_search_active: false,
             show_help: false,
             copied: None,
+            cmux_available,
         }
     }
 

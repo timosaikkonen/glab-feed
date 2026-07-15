@@ -47,6 +47,7 @@ path = "group/my-repo"
 | `↑` `↓` / `j` `k` | Move selection |
 | `m` | Toggle showing only my own MRs |
 | `Enter` | Open selected MR in browser |
+| `Opt-Enter` | Open selected MR in cmux split (when `cmux` is installed) |
 | `c` | Copy MR URL to clipboard |
 | `C` | Copy MR reference (e.g. `!2191`) to clipboard |
 | `s` | Open the repo selector |

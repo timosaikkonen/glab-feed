@@ -50,7 +50,7 @@ pub fn render(f: &mut Frame, app: &mut App) {
     } else if app.selector.is_some() {
         render_selector(f, app);
     } else if app.show_help {
-        render_help(f);
+        render_help(f, app);
     }
 }
 
@@ -378,7 +378,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(keys, rows[1]);
 }
 
-fn render_help(f: &mut Frame) {
+fn render_help(f: &mut Frame, app: &App) {
     let area = centered_rect(f.area(), 50, 50);
     f.render_widget(Clear, area);
 
@@ -390,7 +390,7 @@ fn render_help(f: &mut Frame) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let lines = Text::from(vec![
+    let mut lines = vec![
         Line::from(Span::styled("More hotkeys", Style::default().add_modifier(Modifier::BOLD))),
         Line::from(""),
         Line::from("  H / L        reorder tab left / right"),
@@ -398,8 +398,13 @@ fn render_help(f: &mut Frame) {
         Line::from("  c            copy MR URL to clipboard"),
         Line::from("  C            copy MR reference (e.g. !2191)"),
         Line::from("  s            open repo selector"),
-    ]);
-    f.render_widget(Paragraph::new(lines), inner);
+    ];
+    if app.cmux_available {
+        lines.push(Line::from(
+            "  Alt-Enter  open in cmux split",
+        ));
+    }
+    f.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
 fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
