@@ -12,7 +12,7 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyM
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
-use app::{App, PollEvent, SelectorUpdate};
+use app::{App, CopiedKind, PollEvent, SelectorUpdate};
 use config::RepoCfg;
 use selector::RepoFilter;
 
@@ -105,7 +105,17 @@ async fn run(
     loop {
         tokio::select! {
             // Redraw once a second so the countdown stays live.
-            _ = tick.tick() => {}
+            _ = tick.tick() => {
+                app.clear_expired_copied();
+            }
+
+            // Hide the copy confirmation promptly when its timer expires.
+            _ = async {
+                let until = app.copied.expect("guarded by if").1;
+                tokio::time::sleep_until(tokio::time::Instant::from_std(until)).await;
+            }, if app.copied.is_some() => {
+                app.clear_expired_copied();
+            }
 
             // Poll lifecycle from the poller.
             Some(event) = updates.recv() => {
@@ -146,9 +156,11 @@ async fn run(
     Ok(())
 }
 
-fn copy_to_clipboard(text: &str) {
+fn copy_to_clipboard(text: &str) -> bool {
     if let Ok(mut cb) = arboard::Clipboard::new() {
-        let _ = cb.set_text(text.to_string());
+        cb.set_text(text.to_string()).is_ok()
+    } else {
+        false
     }
 }
 
@@ -215,12 +227,16 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
         }
         (KeyCode::Char('c'), _) => {
             if let Some(url) = app.selected_url() {
-                copy_to_clipboard(&url);
+                if copy_to_clipboard(&url) {
+                    app.show_copied(CopiedKind::Url);
+                }
             }
         }
         (KeyCode::Char('C'), _) => {
             if let Some(id) = app.selected_id() {
-                copy_to_clipboard(&id);
+                if copy_to_clipboard(&id) {
+                    app.show_copied(CopiedKind::Ref);
+                }
             }
         }
         (KeyCode::Char('/'), _) => app.enter_mr_search(),

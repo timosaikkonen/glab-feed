@@ -48,6 +48,22 @@ pub struct SelectorUpdate {
     pub result: Result<Vec<Project>, String>,
 }
 
+/// What was copied to the clipboard for the footer confirmation message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopiedKind {
+    Url,
+    Ref,
+}
+
+impl CopiedKind {
+    pub fn message(self) -> &'static str {
+        match self {
+            CopiedKind::Url => "URL copied!",
+            CopiedKind::Ref => "Ref copied!",
+        }
+    }
+}
+
 pub struct App {
     pub host: String,
     pub repos: Vec<RepoCfg>,
@@ -74,6 +90,8 @@ pub struct App {
     pub mr_query: String,
     pub mr_search_active: bool,
     pub show_help: bool,
+    /// When set, the footer shows a copy confirmation until this instant.
+    pub copied: Option<(CopiedKind, Instant)>,
 }
 
 impl App {
@@ -100,6 +118,27 @@ impl App {
             mr_query: String::new(),
             mr_search_active: false,
             show_help: false,
+            copied: None,
+        }
+    }
+
+    pub fn show_copied(&mut self, kind: CopiedKind) {
+        self.copied = Some((kind, Instant::now() + Duration::from_secs(2)));
+    }
+
+    pub fn active_copied(&self) -> Option<CopiedKind> {
+        self.copied.and_then(|(kind, until)| {
+            if Instant::now() < until {
+                Some(kind)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn clear_expired_copied(&mut self) {
+        if self.copied.is_some_and(|(_, until)| Instant::now() >= until) {
+            self.copied = None;
         }
     }
 

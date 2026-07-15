@@ -346,7 +346,12 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     )));
     f.render_widget(filter, status_cols[0]);
 
-    let poll = if app.fetching {
+    let poll = if let Some(kind) = app.active_copied() {
+        Paragraph::new(Line::from(Span::styled(
+            kind.message(),
+            Style::default().fg(Color::Black).bg(Color::Green),
+        )))
+    } else if app.fetching {
         Paragraph::new(Line::from(Span::styled(
             "Fetching",
             Style::default().fg(Color::Black).bg(Color::Cyan),
