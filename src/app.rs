@@ -92,7 +92,7 @@ pub struct App {
     pub show_help: bool,
     /// When set, the footer shows a copy confirmation until this instant.
     pub copied: Option<(CopiedKind, Instant)>,
-    /// Whether `cmux` is on PATH (enables Shift-Enter to open in a split).
+    /// Whether `cmux` is on PATH (enables Opt-Enter to open in a split).
     pub cmux_available: bool,
 }
 
