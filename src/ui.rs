@@ -99,11 +99,7 @@ fn render_tabs(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .enumerate()
         .map(|(i, repo)| {
-            let count = app
-                .repo_states
-                .get(i)
-                .map(|s| s.mrs.len())
-                .unwrap_or(0);
+            let count = app.repo_states.get(i).map(|s| s.mrs.len()).unwrap_or(0);
             let err = app
                 .repo_states
                 .get(i)
@@ -128,9 +124,16 @@ fn render_tabs(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
+    let mrs = app.visible_mrs();
+    let title = if mrs.is_empty() {
+        " Merge Requests ".to_string()
+    } else {
+        format!(" Merge Requests ({}) ", mrs.len())
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" Merge Requests ")
+        .title(title)
         .padding(Padding::horizontal(1));
 
     // Surface errors / loading / empty states.
@@ -149,7 +152,6 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         }
     }
 
-    let mrs = app.visible_mrs();
     if mrs.is_empty() {
         let msg = if !app.mr_query.is_empty() {
             format!("No merge requests matching \"{}\".", app.mr_query)
@@ -334,7 +336,8 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let mine = if app.mine_only { "mine" } else { "all" };
 
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
-    let status_cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).split(rows[0]);
+    let status_cols =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).split(rows[0]);
 
     let filter = Paragraph::new(Line::from(Span::styled(
         format!("filter: {mine}"),
@@ -391,7 +394,10 @@ fn render_help(f: &mut Frame, app: &App) {
     f.render_widget(block, area);
 
     let mut lines = vec![
-        Line::from(Span::styled("More hotkeys", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "More hotkeys",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from("  H / L        reorder tab left / right"),
         Line::from("  m            toggle mine-only filter"),
@@ -400,9 +406,7 @@ fn render_help(f: &mut Frame, app: &App) {
         Line::from("  s            open repo selector"),
     ];
     if app.cmux_available {
-        lines.push(Line::from(
-            "  Alt-Enter  open in cmux split",
-        ));
+        lines.push(Line::from("  Alt-Enter  open in cmux split"));
     }
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
@@ -447,10 +451,7 @@ fn render_selector(f: &mut Frame, app: &App) {
         return;
     }
     if sel.projects.is_empty() {
-        f.render_widget(
-            Paragraph::new("No projects for this filter.").dim(),
-            inner,
-        );
+        f.render_widget(Paragraph::new("No projects for this filter.").dim(), inner);
         return;
     }
 
