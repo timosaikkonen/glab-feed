@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, Padding, Paragraph, Row, Table, Tabs},
+    widgets::{Block, Borders, Cell, Clear, List, ListItem, Padding, Paragraph, Row, Table, Tabs, Wrap},
     Frame,
 };
 
@@ -126,26 +126,30 @@ fn render_tabs(f: &mut Frame, app: &App, area: Rect) {
 
 fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     let mrs = app.visible_mrs();
-    let title = if mrs.is_empty() {
+    let stale = app.showing_cached_mrs();
+    let fetch_error = app
+        .current_state()
+        .and_then(|s| s.error.as_deref())
+        .filter(|_| mrs.is_empty());
+
+    let title = if stale {
+        format!(" Merge Requests ({}) — offline ", mrs.len())
+    } else if mrs.is_empty() {
         " Merge Requests ".to_string()
     } else {
         format!(" Merge Requests ({}) ", mrs.len())
     };
 
-    let block = Block::default()
+    let mut block = Block::default()
         .borders(Borders::ALL)
         .title(title)
         .padding(Padding::horizontal(1));
+    if stale {
+        block = block.title_bottom(" showing cached data ");
+    }
 
-    // Surface errors / loading / empty states.
+    // Surface loading / empty-with-error states without replacing a populated table.
     if let Some(state) = app.current_state() {
-        if let Some(err) = &state.error {
-            let p = Paragraph::new(format!("Error fetching this repo:\n{err}"))
-                .red()
-                .block(block);
-            f.render_widget(p, area);
-            return;
-        }
         if !state.loaded {
             let p = Paragraph::new("Loading...").dim().block(block);
             f.render_widget(p, area);
@@ -154,6 +158,14 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
     }
 
     if mrs.is_empty() {
+        if let Some(err) = fetch_error {
+            let p = Paragraph::new(format!("Could not fetch merge requests.\n{err}"))
+                .wrap(Wrap { trim: true })
+                .red()
+                .block(block);
+            f.render_widget(p, area);
+            return;
+        }
         let msg = if !app.mr_query.is_empty() {
             format!("No merge requests matching \"{}\".", app.mr_query)
         } else if app.mine_only {
@@ -360,6 +372,11 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         Paragraph::new(Line::from(Span::styled(
             "Fetching",
             Style::default().fg(Color::Black).bg(Color::Cyan),
+        )))
+    } else if app.showing_cached_mrs() {
+        Paragraph::new(Line::from(Span::styled(
+            "offline",
+            Style::default().fg(Color::Black).bg(Color::Yellow),
         )))
     } else if let Some(err) = &app.poll_error {
         Paragraph::new(Line::from(Span::styled(

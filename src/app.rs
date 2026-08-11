@@ -26,6 +26,33 @@ fn is_auth_error(msg: &str) -> bool {
     m.contains("401") || m.contains("unauthorized") || m.contains("unauthenticated")
 }
 
+/// Short, stable label for poll failures (avoids dumping glab stderr into the TUI).
+fn shorten_fetch_error(msg: &str) -> String {
+    let m = msg.to_lowercase();
+    if m.contains("connection refused")
+        || m.contains("connection reset")
+        || m.contains("no route to host")
+        || m.contains("network is unreachable")
+        || m.contains("timed out")
+        || m.contains("timeout")
+        || m.contains("no such host")
+        || m.contains("failed to connect")
+        || m.contains("could not resolve")
+        || m.contains("name or service not known")
+    {
+        return "GitLab unreachable".to_string();
+    }
+    if is_auth_error(msg) {
+        return "Authentication failed".to_string();
+    }
+    let line = msg.lines().next().unwrap_or(msg).trim();
+    if line.len() > 72 {
+        format!("{}…", &line[..69])
+    } else {
+        line.to_string()
+    }
+}
+
 /// A full poll cycle's results, each tagged with the repo path it belongs to
 /// so results survive repo-set changes without index races.
 #[derive(Debug)]
@@ -244,6 +271,12 @@ impl App {
         self.repo_states.get(self.selected_tab)
     }
 
+    /// True when the current tab is showing stale MRs after a failed refresh.
+    pub fn showing_cached_mrs(&self) -> bool {
+        self.current_state()
+            .is_some_and(|s| s.error.is_some() && !s.mrs.is_empty())
+    }
+
     pub fn seconds_to_next_poll(&self) -> u64 {
         self.next_poll
             .saturating_duration_since(Instant::now())
@@ -272,7 +305,7 @@ impl App {
                     }
                     Err(e) => {
                         failures += 1;
-                        state.error = Some(e);
+                        state.error = Some(shorten_fetch_error(&e));
                     }
                 }
             }
