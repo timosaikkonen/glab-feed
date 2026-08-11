@@ -94,6 +94,8 @@ pub struct App {
     pub copied: Option<(CopiedKind, Instant)>,
     /// Whether `cmux` is on PATH (enables Opt-Enter to open in a split).
     pub cmux_available: bool,
+    /// Last `surface_ref` from `cmux --json browser open`, reused when still a browser.
+    pub cmux_surface_ref: Option<String>,
 }
 
 impl App {
@@ -127,6 +129,7 @@ impl App {
             show_help: false,
             copied: None,
             cmux_available,
+            cmux_surface_ref: None,
         }
     }
 

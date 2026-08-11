@@ -10,6 +10,7 @@ use std::time::Duration;
 use anyhow::Result;
 use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
+use serde::Deserialize;
 use tokio::sync::mpsc;
 
 use app::{App, CopiedKind, PollEvent, SelectorUpdate};
@@ -177,10 +178,66 @@ fn cmux_available() -> bool {
         .unwrap_or(false)
 }
 
-fn open_in_cmux(url: &str) {
-    let _ = std::process::Command::new("cmux")
-        .args(["browser", "open", url])
-        .spawn();
+fn open_in_cmux(app: &mut App, url: &str) {
+    if let Some(stored) = app.cmux_surface_ref.clone() {
+        if cmux_browser_surface_exists(&stored) {
+            let _ = std::process::Command::new("cmux")
+                .args(["--json", "browser", &stored, "open", url])
+                .spawn();
+            return;
+        }
+        app.cmux_surface_ref = None;
+    }
+
+    let Ok(output) = std::process::Command::new("cmux")
+        .args(["--json", "browser", "open", url])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    if let Ok(resp) = serde_json::from_slice::<CmuxBrowserOpenResponse>(&output.stdout) {
+        app.cmux_surface_ref = Some(resp.surface_ref);
+    }
+}
+
+#[derive(Deserialize)]
+struct CmuxBrowserOpenResponse {
+    surface_ref: String,
+}
+
+#[derive(Deserialize)]
+struct CmuxListPanelsResponse {
+    surfaces: Vec<CmuxPanelSurface>,
+}
+
+#[derive(Deserialize)]
+struct CmuxPanelSurface {
+    #[serde(rename = "ref")]
+    surface_ref: String,
+    #[serde(rename = "type")]
+    surface_type: String,
+}
+
+fn cmux_browser_surface_exists(surface_ref: &str) -> bool {
+    let Ok(output) = std::process::Command::new("cmux")
+        .args(["--json", "list-panels"])
+        .output()
+    else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    let Ok(panels) = serde_json::from_slice::<CmuxListPanelsResponse>(&output.stdout) else {
+        return false;
+    };
+    panels
+        .surfaces
+        .iter()
+        .any(|s| s.surface_ref == surface_ref && s.surface_type == "browser")
 }
 
 /// Spawn a background task fetching projects for `filter`.
@@ -241,7 +298,7 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
         }
         (KeyCode::Enter, KeyModifiers::ALT) if app.cmux_available => {
             if let Some(url) = app.selected_url() {
-                open_in_cmux(&url);
+                open_in_cmux(app, &url);
             }
         }
         (KeyCode::Enter, _) => {
