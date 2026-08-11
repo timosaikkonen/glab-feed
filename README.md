@@ -6,8 +6,9 @@ A live-updating terminal UI for GitLab merge requests, built with [ratatui](http
 
 ## Features
 
-- Repo tabs across the top, one per configured project
+- Repo tabs across the top, one per configured project, plus a Notifications tab
 - Table of open MRs with title + author, comment count + last commenter, status (draft/open/approved), CI result, and age
+- **Notifications feed** — persistent list of MR comments, reviews, review requests, and failed pipelines
 - Live countdown to the next poll, default sort by most recently updated
 - First-run setup: enter your GitLab host, then pick repos from a filterable tree
 - Interactive repo selector, saved back to `config.toml`
@@ -43,16 +44,22 @@ path = "group/my-repo"
 
 | Key | Action |
 | --- | --- |
-| `Tab` / `←` `→` | Switch repo tab |
+| `Tab` / `←` `→` | Switch tab (repos or Notifications) |
+| `0` / `1` | Jump to first repo |
+| `2`–`8` | Jump to repo 2–8 |
+| `9` | Jump to last repo |
+| `n` | Jump to Notifications tab |
 | `↑` `↓` / `j` `k` | Move selection |
-| `m` | Toggle showing only my own MRs |
-| `Enter` | Open selected MR in browser |
+| `m` | Toggle showing only my own MRs (repo tabs) |
+| `Enter` | Open selected MR or notification in browser |
 | `Opt-Enter` | Open selected MR in cmux split (when `cmux` is installed) |
-| `c` | Copy MR URL to clipboard |
+| `c` | Copy MR/notification URL to clipboard |
 | `C` | Copy MR reference (e.g. `!2191`) to clipboard |
 | `s` | Open the repo selector |
 | `r` | Refresh now |
 | `q` / `Esc` | Quit |
+
+Notifications are stored in the same config directory as `config.toml` (`notifications.json`), capped at 300 items.
 
 ### Repo selector
 

@@ -5,6 +5,7 @@ use ratatui::widgets::TableState;
 
 use crate::config::RepoCfg;
 use crate::gitlab::MergeRequest;
+use crate::notifications::{Notification, NotificationStore};
 use crate::selector::{Project, RepoFilter, RepoSelector};
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(15);
@@ -60,11 +61,19 @@ pub struct PollUpdate {
     pub results: Vec<(String, FetchResult)>,
 }
 
+/// Notification poll completed separately from the MR fetch cycle.
+#[derive(Debug)]
+pub struct NotificationUpdate {
+    pub store: NotificationStore,
+    pub new_count: usize,
+}
+
 /// Lifecycle events from the background poller.
 #[derive(Debug)]
 pub enum PollEvent {
     Started,
     Finished(PollUpdate),
+    NotificationsUpdated(NotificationUpdate),
 }
 
 /// A projects fetch result for the repo selector, tagged with its filter so
@@ -123,6 +132,9 @@ pub struct App {
     pub cmux_available: bool,
     /// Last `surface_ref` from `cmux --json browser open`, reused when still a browser.
     pub cmux_surface_ref: Option<String>,
+    pub notification_store: NotificationStore,
+    pub notification_list_state: TableState,
+    pub new_notification_count: usize,
 }
 
 impl App {
@@ -133,6 +145,7 @@ impl App {
         cmux_available: bool,
     ) -> Self {
         let repo_states = vec![RepoState::default(); repos.len()];
+        let notification_store = NotificationStore::load();
         App {
             host,
             repos,
@@ -157,6 +170,65 @@ impl App {
             copied: None,
             cmux_available,
             cmux_surface_ref: None,
+            notification_store,
+            notification_list_state: TableState::default(),
+            new_notification_count: 0,
+        }
+    }
+
+    /// Total tabs: one per repo plus notifications.
+    pub fn tab_count(&self) -> usize {
+        self.repos.len() + 1
+    }
+
+    pub fn is_notifications_tab(&self) -> bool {
+        self.selected_tab == self.repos.len()
+    }
+
+    pub fn select_tab(&mut self, index: usize) {
+        let index = index.min(self.tab_count().saturating_sub(1));
+        let entering_notifications = index == self.repos.len() && !self.is_notifications_tab();
+        if entering_notifications {
+            self.new_notification_count = 0;
+        }
+        self.selected_tab = index;
+        if self.is_notifications_tab() {
+            self.reset_notification_selection();
+        } else {
+            self.reset_selection();
+        }
+    }
+
+    pub fn select_notifications_tab(&mut self) {
+        self.select_tab(self.repos.len());
+    }
+
+    pub fn select_repo_tab(&mut self, repo_index: usize) {
+        if repo_index < self.repos.len() {
+            self.select_tab(repo_index);
+        }
+    }
+
+    /// `0`/`1` → first repo, `2`–`8` → repos 2–8, `9` → last repo.
+    pub fn handle_digit_tab(&mut self, digit: char) {
+        if self.repos.is_empty() {
+            return;
+        }
+        let repo_index = match digit {
+            '0' | '1' => Some(0),
+            '2'..='8' => {
+                let idx = (digit as u8 - b'1') as usize;
+                if idx < self.repos.len() {
+                    Some(idx)
+                } else {
+                    None
+                }
+            }
+            '9' => Some(self.repos.len() - 1),
+            _ => None,
+        };
+        if let Some(idx) = repo_index {
+            self.select_repo_tab(idx);
         }
     }
 
@@ -175,7 +247,10 @@ impl App {
     }
 
     pub fn clear_expired_copied(&mut self) {
-        if self.copied.is_some_and(|(_, until)| Instant::now() >= until) {
+        if self
+            .copied
+            .is_some_and(|(_, until)| Instant::now() >= until)
+        {
             self.copied = None;
         }
     }
@@ -235,11 +310,7 @@ impl App {
         if self.mr_query.is_empty() {
             return true;
         }
-        let q = self
-            .mr_query
-            .trim()
-            .trim_start_matches('!')
-            .to_lowercase();
+        let q = self.mr_query.trim().trim_start_matches('!').to_lowercase();
         mr.iid.to_lowercase().contains(&q) || mr.title.to_lowercase().contains(&q)
     }
 
@@ -324,12 +395,18 @@ impl App {
         self.clamp_selection();
     }
 
+    pub fn handle_notifications_updated(&mut self, update: NotificationUpdate) {
+        self.notification_store = update.store;
+        self.new_notification_count += update.new_count;
+        self.clamp_notification_selection();
+    }
+
     /// Replace the configured repos (e.g. after saving from the selector).
     pub fn set_repos(&mut self, repos: Vec<RepoCfg>) {
         self.repos = repos;
         self.repo_states = vec![RepoState::default(); self.repos.len()];
-        if self.selected_tab >= self.repos.len() {
-            self.selected_tab = self.repos.len().saturating_sub(1);
+        if self.selected_tab >= self.tab_count() {
+            self.selected_tab = self.tab_count().saturating_sub(1);
         }
         self.next_poll = Instant::now() + POLL_INTERVAL;
         self.reset_selection();
@@ -338,8 +415,7 @@ impl App {
     // ----- Repo selector -----
 
     pub fn open_selector(&mut self) {
-        let selected: HashSet<String> =
-            self.repos.iter().map(|r| r.path.clone()).collect();
+        let selected: HashSet<String> = self.repos.iter().map(|r| r.path.clone()).collect();
         self.selector = Some(RepoSelector::new(selected));
     }
 
@@ -376,22 +452,20 @@ impl App {
     }
 
     pub fn next_tab(&mut self) {
-        if !self.repos.is_empty() {
-            self.selected_tab = (self.selected_tab + 1) % self.repos.len();
-            self.reset_selection();
+        if self.tab_count() > 0 {
+            self.select_tab((self.selected_tab + 1) % self.tab_count());
         }
     }
 
     pub fn prev_tab(&mut self) {
-        if !self.repos.is_empty() {
-            self.selected_tab = (self.selected_tab + self.repos.len() - 1) % self.repos.len();
-            self.reset_selection();
+        if self.tab_count() > 0 {
+            self.select_tab((self.selected_tab + self.tab_count() - 1) % self.tab_count());
         }
     }
 
     /// Move the current tab one position left and persist the new order.
     pub fn move_tab_left(&mut self) {
-        if self.selected_tab == 0 || self.repos.is_empty() {
+        if self.is_notifications_tab() || self.selected_tab == 0 || self.repos.is_empty() {
             return;
         }
         let i = self.selected_tab;
@@ -403,6 +477,9 @@ impl App {
 
     /// Move the current tab one position right and persist the new order.
     pub fn move_tab_right(&mut self) {
+        if self.is_notifications_tab() || self.repos.is_empty() {
+            return;
+        }
         if self.selected_tab + 1 >= self.repos.len() {
             return;
         }
@@ -451,6 +528,63 @@ impl App {
     pub fn toggle_mine(&mut self) {
         self.mine_only = !self.mine_only;
         self.reset_selection();
+    }
+
+    pub fn notifications(&self) -> &[Notification] {
+        &self.notification_store.items
+    }
+
+    pub fn select_notification_next(&mut self) {
+        let len = self.notifications().len();
+        if len == 0 {
+            self.notification_list_state.select(None);
+            return;
+        }
+        let i = match self.notification_list_state.selected() {
+            Some(i) if i + 1 < len => i + 1,
+            Some(i) => i,
+            None => 0,
+        };
+        self.notification_list_state.select(Some(i));
+    }
+
+    pub fn select_notification_prev(&mut self) {
+        let len = self.notifications().len();
+        if len == 0 {
+            self.notification_list_state.select(None);
+            return;
+        }
+        let i = match self.notification_list_state.selected() {
+            Some(0) | None => 0,
+            Some(i) => i - 1,
+        };
+        self.notification_list_state.select(Some(i));
+    }
+
+    pub fn selected_notification_url(&self) -> Option<String> {
+        let idx = self.notification_list_state.selected()?;
+        self.notifications()
+            .get(idx)
+            .map(|n| n.url.clone())
+            .filter(|u| !u.is_empty())
+    }
+
+    fn reset_notification_selection(&mut self) {
+        if self.notifications().is_empty() {
+            self.notification_list_state.select(None);
+        } else {
+            self.notification_list_state.select(Some(0));
+        }
+    }
+
+    fn clamp_notification_selection(&mut self) {
+        let len = self.notifications().len();
+        match self.notification_list_state.selected() {
+            _ if len == 0 => self.notification_list_state.select(None),
+            Some(i) if i >= len => self.notification_list_state.select(Some(len - 1)),
+            None if len > 0 => self.notification_list_state.select(Some(0)),
+            _ => {}
+        }
     }
 
     /// URL of the currently selected MR, if any.

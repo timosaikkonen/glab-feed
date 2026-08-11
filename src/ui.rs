@@ -30,20 +30,26 @@ fn update_activity_glyph(activity: UpdateActivity) -> &'static str {
 
 use crate::app::App;
 use crate::gitlab::{CiStatus, MergeRequest, UpdateActivity};
+use crate::notifications::NotificationKind;
 use crate::selector::DisplayRow;
 
 pub fn render(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(3), // tabs
-        Constraint::Length(1), // MR filter
-        Constraint::Min(1),    // table
+        Constraint::Length(1), // MR filter (blank on notifications tab)
+        Constraint::Min(1),    // table or notifications list
         Constraint::Length(2), // footer
     ])
     .split(f.area());
 
     render_tabs(f, app, chunks[0]);
-    render_mr_search(f, app, chunks[1]);
-    render_table(f, app, chunks[2]);
+    if app.is_notifications_tab() {
+        f.render_widget(Paragraph::new(""), chunks[1]);
+        render_notifications_list(f, app, chunks[2]);
+    } else {
+        render_mr_search(f, app, chunks[1]);
+        render_table(f, app, chunks[2]);
+    }
     render_footer(f, app, chunks[3]);
 
     if app.awaiting_url {
@@ -95,7 +101,7 @@ fn render_url_prompt(f: &mut Frame, app: &App) {
 }
 
 fn render_tabs(f: &mut Frame, app: &App, area: Rect) {
-    let titles: Vec<Line> = app
+    let mut titles: Vec<Line> = app
         .repos
         .iter()
         .enumerate()
@@ -111,9 +117,16 @@ fn render_tabs(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
 
+    let notif_count = app.notifications().len();
+    let mut notif_label = format!(" Notifications ({notif_count}) ");
+    if app.new_notification_count > 0 && !app.is_notifications_tab() {
+        notif_label = format!(" Notifications ({notif_count})* ");
+    }
+    titles.push(Line::from(notif_label));
+
     let tabs = Tabs::new(titles)
         .select(app.selected_tab)
-        .block(Block::default().borders(Borders::ALL).title(" Repos "))
+        .block(Block::default().borders(Borders::ALL).title(" Tabs "))
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
@@ -346,22 +359,140 @@ fn render_mr_search(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(line), area);
 }
 
-fn render_footer(f: &mut Frame, app: &App, area: Rect) {
-    let mine = if app.mine_only { "mine" } else { "all" };
+fn notification_kind_glyph(kind: NotificationKind) -> (&'static str, Color) {
+    match kind {
+        NotificationKind::Comment => (NF_NOTE, Color::Cyan),
+        NotificationKind::ReviewSubmitted => (NF_CHECK, Color::Green),
+        NotificationKind::ReviewRequested => (NF_REFRESH, Color::Yellow),
+        NotificationKind::PipelineFailed => (NF_TIMES, Color::Red),
+    }
+}
 
+fn render_notifications_list(f: &mut Frame, app: &mut App, area: Rect) {
+    let items = app.notifications();
+    let title = if items.is_empty() {
+        " Notifications ".to_string()
+    } else {
+        format!(" Notifications ({}) ", items.len())
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .padding(Padding::horizontal(1));
+
+    if items.is_empty() {
+        let p = Paragraph::new("No notifications yet.").dim().block(block);
+        f.render_widget(p, area);
+        return;
+    }
+
+    let header = Row::new(vec![
+        Cell::from(""),
+        Cell::from("Activity"),
+        Cell::from("Summary"),
+        Cell::from("When"),
+    ])
+    .style(Style::default().add_modifier(Modifier::BOLD))
+    .height(1);
+
+    let selected = app.notification_list_state.selected();
+    let rows: Vec<Row> = items
+        .iter()
+        .enumerate()
+        .map(|(i, n)| build_notification_row(n, selected == Some(i)))
+        .collect();
+
+    let widths = [
+        Constraint::Length(3),
+        Constraint::Percentage(30),
+        Constraint::Percentage(50),
+        Constraint::Length(14),
+    ];
+
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(block)
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    f.render_stateful_widget(table, area, &mut app.notification_list_state);
+}
+
+fn build_notification_row(n: &crate::notifications::Notification, selected: bool) -> Row<'static> {
+    let secondary = mr_secondary_style(selected);
+    let (glyph, color) = notification_kind_glyph(n.kind);
+    let kind_cell = Cell::from(Text::from(vec![Line::from(Span::styled(
+        glyph,
+        Style::default().fg(color),
+    ))]));
+
+    let mr_ref = n
+        .mr_iid
+        .as_ref()
+        .map(|iid| format!("!{iid} "))
+        .unwrap_or_default();
+    let repo_line = if n.repo.is_empty() {
+        mr_ref.trim().to_string()
+    } else {
+        format!("{} {}", n.repo, mr_ref).trim().to_string()
+    };
+
+    let activity_cell = Cell::from(Text::from(vec![
+        Line::from(Span::styled(
+            format!("@{} {}", n.author, n.kind.verb()),
+            mr_title_style(),
+        )),
+        Line::from(Span::styled(repo_line, secondary)),
+    ]));
+
+    let summary_cell = Cell::from(Text::from(vec![Line::from(Span::styled(
+        n.summary.clone(),
+        secondary,
+    ))]));
+
+    let when = HumanTime::from(n.at - Utc::now()).to_string();
+    let when_cell = Cell::from(Text::from(vec![Line::from(Span::styled(
+        when,
+        Style::default().fg(Color::Gray),
+    ))]));
+
+    Row::new(vec![kind_cell, activity_cell, summary_cell, when_cell]).height(2)
+}
+
+fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
     let status_cols =
         Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).split(rows[0]);
 
-    let filter = Paragraph::new(Line::from(Span::styled(
-        format!("filter: {mine}"),
-        Style::default().fg(if app.mine_only {
-            Color::Green
-        } else {
-            Color::Gray
-        }),
-    )));
-    f.render_widget(filter, status_cols[0]);
+    let status_line = if app.is_notifications_tab() {
+        Line::from(Span::styled(
+            "notifications",
+            Style::default().fg(Color::Cyan),
+        ))
+    } else {
+        let mine = if app.mine_only { "mine" } else { "all" };
+        let mut filter_text = format!("filter: {mine}");
+        if app.new_notification_count > 0 {
+            filter_text.push_str(&format!(
+                "  |  {} new notification(s)",
+                app.new_notification_count
+            ));
+        }
+        Line::from(Span::styled(
+            filter_text,
+            Style::default().fg(if app.mine_only {
+                Color::Green
+            } else {
+                Color::Gray
+            }),
+        ))
+    };
+    f.render_widget(Paragraph::new(status_line), status_cols[0]);
 
     let poll = if let Some(kind) = app.active_copied() {
         Paragraph::new(Line::from(Span::styled(
@@ -393,8 +524,13 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     .alignment(Alignment::Right);
     f.render_widget(poll, status_cols[1]);
 
+    let keys_hint = if app.is_notifications_tab() {
+        " [Tab/←→] tab  [0-9/n] jump  [↑↓] select  [Enter] open  [c] copy  [r] refresh  [?] help  [q] quit"
+    } else {
+        " [Tab/←→] tab  [0-9/n] jump  [↑↓] select  [/] filter  [Enter] open  [r] refresh  [?] help  [q] quit"
+    };
     let keys = Paragraph::new(Line::from(Span::styled(
-        " [Tab/←→] repo  [↑↓] select  [/] filter  [Enter] open  [r] refresh  [?] help  [q] quit",
+        keys_hint,
         Style::default().fg(Color::DarkGray),
     )));
     f.render_widget(keys, rows[1]);
@@ -418,9 +554,11 @@ fn render_help(f: &mut Frame, app: &App) {
             Style::default().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
-        Line::from("  H / L        reorder tab left / right"),
+        Line::from("  H / L        reorder repo tab left / right"),
         Line::from("  m            toggle mine-only filter"),
-        Line::from("  c            copy MR URL to clipboard"),
+        Line::from("  n            jump to notifications tab"),
+        Line::from("  0-9          jump to repo tab (0/1=first, 9=last)"),
+        Line::from("  c            copy URL to clipboard"),
         Line::from("  C            copy MR reference (e.g. !2191)"),
         Line::from("  s            open repo selector"),
     ];

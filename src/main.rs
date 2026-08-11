@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod gitlab;
+mod notifications;
 mod poller;
 mod selector;
 mod ui;
@@ -15,6 +16,7 @@ use tokio::sync::mpsc;
 
 use app::{App, CopiedKind, PollEvent, SelectorUpdate};
 use config::RepoCfg;
+use notifications::NotificationStore;
 use selector::RepoFilter;
 
 /// Shared channels the event loop needs when handling keys.
@@ -23,6 +25,7 @@ struct Channels {
     reconfigure_tx: mpsc::Sender<(String, Vec<RepoCfg>)>,
     selector_res_tx: mpsc::Sender<SelectorUpdate>,
     user_res_tx: mpsc::Sender<String>,
+    user_poll_tx: mpsc::Sender<String>,
 }
 
 #[tokio::main]
@@ -56,7 +59,7 @@ async fn main() -> Result<()> {
     let mut app = App::new(
         host.clone(),
         repos.clone(),
-        current_user,
+        current_user.clone(),
         cmux_available(),
     );
     if cfg.is_none() {
@@ -67,13 +70,24 @@ async fn main() -> Result<()> {
     let (reconfigure_tx, reconfigure_rx) = mpsc::channel::<(String, Vec<RepoCfg>)>(1);
     let (selector_res_tx, mut selector_res_rx) = mpsc::channel::<SelectorUpdate>(4);
     let (user_res_tx, mut user_res_rx) = mpsc::channel::<String>(1);
-    let mut updates = poller::spawn(host, repos, refresh_rx, reconfigure_rx);
+    let (user_poll_tx, user_poll_rx) = mpsc::channel::<String>(1);
+    let notification_store = NotificationStore::load();
+    let mut updates = poller::spawn(
+        host,
+        repos,
+        current_user,
+        notification_store,
+        refresh_rx,
+        reconfigure_rx,
+        user_poll_rx,
+    );
 
     let channels = Channels {
         refresh_tx,
         reconfigure_tx,
         selector_res_tx,
         user_res_tx,
+        user_poll_tx,
     };
 
     let mut terminal = ratatui::init();
@@ -128,6 +142,9 @@ async fn run(
                 match event {
                     PollEvent::Started => app.handle_poll_started(),
                     PollEvent::Finished(update) => app.handle_poll_finished(update),
+                    PollEvent::NotificationsUpdated(update) => {
+                        app.handle_notifications_updated(update);
+                    }
                 }
             }
 
@@ -138,7 +155,8 @@ async fn run(
 
             // Current user resolved after first-run URL entry.
             Some(user) = user_res_rx.recv() => {
-                app.set_current_user(user);
+                app.set_current_user(user.clone());
+                let _ = channels.user_poll_tx.try_send(user);
             }
 
             // Terminal input.
@@ -178,31 +196,6 @@ fn cmux_available() -> bool {
         .unwrap_or(false)
 }
 
-fn open_in_cmux(app: &mut App, url: &str) {
-    if let Some(stored) = app.cmux_surface_ref.clone() {
-        if cmux_browser_surface_exists(&stored) {
-            let _ = std::process::Command::new("cmux")
-                .args(["--json", "browser", &stored, "open", url])
-                .spawn();
-            return;
-        }
-        app.cmux_surface_ref = None;
-    }
-
-    let Ok(output) = std::process::Command::new("cmux")
-        .args(["--json", "browser", "open", url])
-        .output()
-    else {
-        return;
-    };
-    if !output.status.success() {
-        return;
-    }
-    if let Ok(resp) = serde_json::from_slice::<CmuxBrowserOpenResponse>(&output.stdout) {
-        app.cmux_surface_ref = Some(resp.surface_ref);
-    }
-}
-
 #[derive(Deserialize)]
 struct CmuxBrowserOpenResponse {
     surface_ref: String,
@@ -238,6 +231,31 @@ fn cmux_browser_surface_exists(surface_ref: &str) -> bool {
         .surfaces
         .iter()
         .any(|s| s.surface_ref == surface_ref && s.surface_type == "browser")
+}
+
+fn open_in_cmux(app: &mut App, url: &str) {
+    if let Some(stored) = app.cmux_surface_ref.clone() {
+        if cmux_browser_surface_exists(&stored) {
+            let _ = std::process::Command::new("cmux")
+                .args(["--json", "browser", &stored, "open", url])
+                .spawn();
+            return;
+        }
+        app.cmux_surface_ref = None;
+    }
+
+    let Ok(output) = std::process::Command::new("cmux")
+        .args(["--json", "browser", "open", url])
+        .output()
+    else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    if let Ok(resp) = serde_json::from_slice::<CmuxBrowserOpenResponse>(&output.stdout) {
+        app.cmux_surface_ref = Some(resp.surface_ref);
+    }
 }
 
 /// Spawn a background task fetching projects for `filter`.
@@ -282,47 +300,77 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
         (KeyCode::Char('q'), _) | (KeyCode::Esc, _) => app.should_quit = true,
         (KeyCode::Tab, _) | (KeyCode::Right, _) => app.next_tab(),
         (KeyCode::BackTab, _) | (KeyCode::Left, _) => app.prev_tab(),
-        (KeyCode::Char('H'), _) => app.move_tab_left(),
-        (KeyCode::Char('L'), _) => app.move_tab_right(),
-        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.select_next(),
-        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.select_prev(),
-        (KeyCode::Char('m'), _) => app.toggle_mine(),
+        (KeyCode::Char('n'), _) => app.select_notifications_tab(),
+        (KeyCode::Char(c @ '0'..='9'), _) => app.handle_digit_tab(c),
         (KeyCode::Char('r'), _) => {
             let _ = channels.refresh_tx.try_send(());
         }
-        (KeyCode::Char('s'), _) => {
-            app.open_selector();
-            if let Some(sel) = app.selector.as_ref() {
-                spawn_project_fetch(app.host.clone(), sel.filter, channels.selector_res_tx.clone());
-            }
-        }
-        (KeyCode::Enter, KeyModifiers::ALT) if app.cmux_available => {
-            if let Some(url) = app.selected_url() {
-                open_in_cmux(app, &url);
-            }
-        }
-        (KeyCode::Enter, _) => {
-            if let Some(url) = app.selected_url() {
-                let _ = open::that_detached(url);
-            }
-        }
-        (KeyCode::Char('c'), _) => {
-            if let Some(url) = app.selected_url() {
-                if copy_to_clipboard(&url) {
-                    app.show_copied(CopiedKind::Url);
-                }
-            }
-        }
-        (KeyCode::Char('C'), _) => {
-            if let Some(id) = app.selected_id() {
-                if copy_to_clipboard(&id) {
-                    app.show_copied(CopiedKind::Ref);
-                }
-            }
-        }
-        (KeyCode::Char('/'), _) => app.enter_mr_search(),
         (KeyCode::Char('?'), _) => app.show_help = true,
-        _ => {}
+        _ if app.is_notifications_tab() => match (key.code, key.modifiers) {
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.select_notification_next(),
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.select_notification_prev(),
+            (KeyCode::Enter, KeyModifiers::ALT) if app.cmux_available => {
+                if let Some(url) = app.selected_notification_url() {
+                    open_in_cmux(app, &url);
+                }
+            }
+            (KeyCode::Enter, _) => {
+                if let Some(url) = app.selected_notification_url() {
+                    let _ = open::that_detached(url);
+                }
+            }
+            (KeyCode::Char('c'), _) => {
+                if let Some(url) = app.selected_notification_url() {
+                    if copy_to_clipboard(&url) {
+                        app.show_copied(CopiedKind::Url);
+                    }
+                }
+            }
+            _ => {}
+        },
+        _ => match (key.code, key.modifiers) {
+            (KeyCode::Char('H'), _) => app.move_tab_left(),
+            (KeyCode::Char('L'), _) => app.move_tab_right(),
+            (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.select_next(),
+            (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.select_prev(),
+            (KeyCode::Char('m'), _) => app.toggle_mine(),
+            (KeyCode::Char('s'), _) => {
+                app.open_selector();
+                if let Some(sel) = app.selector.as_ref() {
+                    spawn_project_fetch(
+                        app.host.clone(),
+                        sel.filter,
+                        channels.selector_res_tx.clone(),
+                    );
+                }
+            }
+            (KeyCode::Enter, KeyModifiers::ALT) if app.cmux_available => {
+                if let Some(url) = app.selected_url() {
+                    open_in_cmux(app, &url);
+                }
+            }
+            (KeyCode::Enter, _) => {
+                if let Some(url) = app.selected_url() {
+                    let _ = open::that_detached(url);
+                }
+            }
+            (KeyCode::Char('c'), _) => {
+                if let Some(url) = app.selected_url() {
+                    if copy_to_clipboard(&url) {
+                        app.show_copied(CopiedKind::Url);
+                    }
+                }
+            }
+            (KeyCode::Char('C'), _) => {
+                if let Some(id) = app.selected_id() {
+                    if copy_to_clipboard(&id) {
+                        app.show_copied(CopiedKind::Ref);
+                    }
+                }
+            }
+            (KeyCode::Char('/'), _) => app.enter_mr_search(),
+            _ => {}
+        },
     }
 }
 

@@ -3,6 +3,25 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::process::Command;
 
+/// Percent-encode a GitLab project path for REST URLs (`group/repo` -> `group%2Frepo`).
+fn encode_project_path(path: &str) -> String {
+    path.replace('/', "%2F")
+}
+
+/// Percent-encode a query-string value.
+fn encode_query(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for b in value.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 #[derive(Debug, Clone)]
 pub struct MergeRequest {
     pub iid: String,
@@ -327,4 +346,189 @@ pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<Mer
     mrs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
 
     Ok(mrs)
+}
+
+// ----- REST API (via `glab api`) -----
+
+/// Run `glab api --hostname <host> <path>` and parse JSON.
+async fn run_rest<T: for<'de> Deserialize<'de>>(host: &str, path: &str) -> Result<T> {
+    let output = Command::new("glab")
+        .arg("api")
+        .arg("--hostname")
+        .arg(host)
+        .arg(path)
+        .output()
+        .await
+        .context("failed to spawn `glab`; is it installed and on PATH?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("glab exited with {}: {}", output.status, stderr.trim());
+    }
+
+    serde_json::from_slice(&output.stdout).context("parsing glab REST JSON")
+}
+
+#[derive(Debug, Clone)]
+pub struct MrCandidate {
+    pub project_id: u64,
+    pub iid: u32,
+    pub web_url: String,
+    pub repo_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestNote {
+    pub id: u64,
+    pub author_username: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub system: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct RestTodo {
+    pub id: u64,
+    pub action_name: String,
+    pub author_username: String,
+    pub body: Option<String>,
+    pub target_url: Option<String>,
+    pub target_title: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestMr {
+    iid: u32,
+    project_id: u64,
+    web_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestNoteRaw {
+    id: u64,
+    body: String,
+    system: bool,
+    author: Option<UserRef>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestTodoRaw {
+    id: u64,
+    action_name: String,
+    body: Option<String>,
+    target_url: Option<String>,
+    author: Option<UserRef>,
+    created_at: DateTime<Utc>,
+    target: Option<RestTodoTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestTodoTarget {
+    title: Option<String>,
+}
+
+const MR_ROLES: &[(&str, &str)] = &[
+    ("author_username", "author"),
+    ("reviewer_username", "reviewer"),
+    ("assignee_username", "assignee"),
+];
+
+/// Open MRs in `repo_path` where `username` has one of author/reviewer/assignee roles.
+pub async fn discover_candidate_mrs(
+    host: &str,
+    repo_path: &str,
+    username: &str,
+    since: &str,
+) -> Result<Vec<MrCandidate>> {
+    let encoded = encode_project_path(repo_path);
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+
+    for (param, _) in MR_ROLES {
+        let path = format!(
+            "projects/{encoded}/merge_requests?state=opened&{param}={}&updated_after={}\
+             &per_page=50&order_by=updated_at&sort=desc",
+            encode_query(username),
+            encode_query(since),
+        );
+        let list: Vec<RestMr> = match run_rest(host, &path).await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        for mr in list {
+            let key = (mr.project_id, mr.iid);
+            if seen.insert(key) {
+                out.push(MrCandidate {
+                    project_id: mr.project_id,
+                    iid: mr.iid,
+                    web_url: mr.web_url,
+                    repo_path: repo_path.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(out)
+}
+
+/// Notes on an MR, oldest first.
+pub async fn fetch_mr_notes(
+    host: &str,
+    project_id: u64,
+    iid: u32,
+) -> Result<Vec<RestNote>> {
+    let path = format!(
+        "projects/{project_id}/merge_requests/{iid}/notes\
+         ?sort=asc&order_by=created_at&per_page=100"
+    );
+    let raw: Vec<RestNoteRaw> = run_rest(host, &path).await?;
+    Ok(raw
+        .into_iter()
+        .map(|n| RestNote {
+            id: n.id,
+            author_username: n
+                .author
+                .map(|a| a.username)
+                .unwrap_or_else(|| "unknown".to_string()),
+            body: n.body,
+            created_at: n.created_at,
+            system: n.system,
+        })
+        .collect())
+}
+
+/// Most recent note id on an MR, if any (used to seed the notification cursor).
+pub async fn fetch_mr_latest_note_id(
+    host: &str,
+    project_id: u64,
+    iid: u32,
+) -> Result<Option<u64>> {
+    let path = format!(
+        "projects/{project_id}/merge_requests/{iid}/notes\
+         ?sort=desc&order_by=created_at&per_page=1"
+    );
+    let raw: Vec<RestNoteRaw> = run_rest(host, &path).await?;
+    Ok(raw.first().map(|n| n.id))
+}
+
+/// Pending todos for the authenticated user.
+pub async fn fetch_pending_todos(host: &str) -> Result<Vec<RestTodo>> {
+    let raw: Vec<RestTodoRaw> = run_rest(host, "todos?state=pending&per_page=50").await?;
+    Ok(raw
+        .into_iter()
+        .map(|t| RestTodo {
+            id: t.id,
+            action_name: t.action_name,
+            author_username: t
+                .author
+                .map(|a| a.username)
+                .unwrap_or_else(|| "unknown".to_string()),
+            body: t.body,
+            target_url: t.target_url,
+            target_title: t.target.and_then(|tg| tg.title),
+            created_at: t.created_at,
+        })
+        .collect())
 }
