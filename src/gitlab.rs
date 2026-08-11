@@ -34,6 +34,7 @@ pub enum CiStatus {
     Pass,
     Fail,
     InProgress,
+    Cancelled,
     Other(String),
     None,
 }
@@ -47,6 +48,7 @@ impl CiStatus {
                 "FAILED" => CiStatus::Fail,
                 "RUNNING" | "PENDING" | "CREATED" | "PREPARING" | "SCHEDULED"
                 | "WAITING_FOR_RESOURCE" => CiStatus::InProgress,
+                "CANCELED" | "CANCELLED" => CiStatus::Cancelled,
                 other => CiStatus::Other(other.to_string()),
             },
         }

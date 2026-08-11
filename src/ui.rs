@@ -11,10 +11,11 @@ use ratatui::{
 /// Secondary text on the second line of two-line MR rows (author, last comment).
 const MR_SECONDARY: Color = Color::DarkGray;
 
-// Nerd Font glyphs (Font Awesome set): check, times, refresh, build, note, push.
+// Nerd Font glyphs (Font Awesome set): check, times, refresh, ban, build, note, push.
 const NF_CHECK: &str = "\u{f00c}";
 const NF_TIMES: &str = "\u{f00d}";
 const NF_REFRESH: &str = "\u{f021}";
+const NF_BAN: &str = "\u{f05e}";
 const NF_BUILD: &str = "\u{f085}";
 const NF_NOTE: &str = "\u{f075}";
 const NF_PUSH: &str = "\u{f126}";
@@ -265,6 +266,7 @@ fn build_row(mr: &MergeRequest, selected: bool) -> Row<'static> {
         CiStatus::Pass => (NF_CHECK.to_string(), Color::Green),
         CiStatus::Fail => (NF_TIMES.to_string(), Color::Red),
         CiStatus::InProgress => (NF_REFRESH.to_string(), Color::Yellow),
+        CiStatus::Cancelled => (NF_BAN.to_string(), Color::DarkGray),
         CiStatus::Other(s) => (s.to_lowercase(), Color::Gray),
         CiStatus::None => ("-".to_string(), Color::Gray),
     };
