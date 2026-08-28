@@ -57,6 +57,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_url_prompt(f, app);
     } else if app.selector.is_some() {
         render_selector(f, app);
+    } else if app.author_selector.is_some() {
+        render_author_selector(f, app);
     } else if app.show_help {
         render_help(f, app);
     }
@@ -182,8 +184,8 @@ fn render_table(f: &mut Frame, app: &mut App, area: Rect) {
         }
         let msg = if !app.mr_query.is_empty() {
             format!("No merge requests matching \"{}\".", app.mr_query)
-        } else if app.mine_only {
-            "No merge requests authored by you here.".to_string()
+        } else if !app.author_filter.is_empty() {
+            "No merge requests from selected authors.".to_string()
         } else {
             "No open merge requests.".to_string()
         };
@@ -484,17 +486,28 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Cyan),
         ))
     } else {
-        let mine = if app.mine_only { "mine" } else { "all" };
-        let mut filter_text = format!("filter: {mine}");
+        let mut parts = vec!["filter: all".to_string()];
+        if !app.author_filter.is_empty() {
+            let author_label = if app.author_filter.len() == 1 {
+                format!("@{}", app.author_filter.iter().next().unwrap())
+            } else {
+                format!("{} authors", app.author_filter.len())
+            };
+            parts[0] = format!("filter: {author_label}");
+        }
+        if !app.mr_query.is_empty() {
+            parts.push(format!("title: \"{}\"", app.mr_query));
+        }
         if app.new_notification_count > 0 {
-            filter_text.push_str(&format!(
-                "  |  {} new notification(s)",
+            parts.push(format!(
+                "{} new notification(s)",
                 app.new_notification_count
             ));
         }
+        let active = !app.author_filter.is_empty() || !app.mr_query.is_empty();
         Line::from(Span::styled(
-            filter_text,
-            Style::default().fg(if app.mine_only {
+            parts.join("  |  "),
+            Style::default().fg(if active {
                 Color::Green
             } else {
                 Color::Gray
@@ -536,7 +549,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let keys_hint = if app.is_notifications_tab() {
         " [Tab/←→] tab  [0-9/n] jump  [↑↓] select  [Enter] open  [c] copy  [r] refresh  [?] help  [q] quit"
     } else {
-        " [Tab/←→] tab  [0-9/n] jump  [↑↓] select  [/] filter  [Enter] open  [r] refresh  [?] help  [q] quit"
+        " [Tab/←→] tab  [0-9/n] jump  [↑↓] select  [/] filter  [a] authors  [f] clear  [Enter] open  [r] refresh  [?] help  [q] quit"
     };
     let keys = Paragraph::new(Line::from(Span::styled(
         keys_hint,
@@ -564,7 +577,10 @@ fn render_help(f: &mut Frame, app: &App) {
         )),
         Line::from(""),
         Line::from("  H / L        reorder repo tab left / right"),
-        Line::from("  m            toggle mine-only filter"),
+        Line::from("  m            toggle mine-only author filter"),
+        Line::from("  a            select author filter"),
+        Line::from("  f            clear all filters"),
+        Line::from("  /            filter by title or IID"),
         Line::from("  n            jump to notifications tab"),
         Line::from("  0-9          jump to repo tab (0/1=first, 9=last)"),
         Line::from("  c            copy URL to clipboard"),
@@ -698,6 +714,119 @@ fn render_search_box(f: &mut Frame, sel: &crate::selector::RepoSelector, area: R
     } else {
         Line::from(Span::styled(
             "/ to search by name",
+            Style::default().fg(Color::DarkGray),
+        ))
+    };
+    f.render_widget(Paragraph::new(line), area);
+}
+
+fn render_author_selector(f: &mut Frame, app: &App) {
+    let Some(sel) = app.author_selector.as_ref() else {
+        return;
+    };
+
+    let area = centered_rect(f.area(), 50, 60);
+    f.render_widget(Clear, area);
+
+    let title = format!(
+        " Filter by author  ({} selected, {} shown) ",
+        sel.selected.len(),
+        sel.visible().len(),
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_bottom(" Space toggle  / filter  Enter apply  Esc cancel ")
+        .padding(Padding::horizontal(1));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    if sel.authors.is_empty() {
+        f.render_widget(
+            Paragraph::new("No authors in this repo yet.").dim(),
+            inner,
+        );
+        return;
+    }
+
+    let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    render_author_search_box(f, sel, parts[0]);
+    let list_area = parts[1];
+
+    if sel.visible().is_empty() {
+        f.render_widget(
+            Paragraph::new(format!("No matches for \"{}\".", sel.query)).dim(),
+            list_area,
+        );
+        return;
+    }
+
+    let mut cursor_idx = 0;
+    let items: Vec<ListItem> = sel
+        .visible()
+        .into_iter()
+        .enumerate()
+        .map(|(i, author)| {
+            if i == sel.cursor {
+                cursor_idx = i;
+            }
+            let checkbox = if sel.selected.contains(&author.username) {
+                "[x]"
+            } else {
+                "[ ]"
+            };
+            let label = if author.name.is_empty() {
+                format!("@{username}", username = author.username)
+            } else {
+                format!(
+                    "{name} (@{username})",
+                    name = author.name,
+                    username = author.username
+                )
+            };
+            let style = if sel.selected.contains(&author.username) {
+                Style::default().fg(Color::Green)
+            } else {
+                Style::default()
+            };
+            ListItem::new(Line::from(Span::styled(
+                format!("  {checkbox}  {label}"),
+                style,
+            )))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(cursor_idx));
+    f.render_stateful_widget(list, list_area, &mut state);
+}
+
+fn render_author_search_box(f: &mut Frame, sel: &crate::app::AuthorSelector, area: Rect) {
+    let line = if sel.search_active {
+        Line::from(vec![
+            Span::styled("/ ", Style::default().fg(Color::Cyan)),
+            Span::styled(
+                sel.query.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("_", Style::default().fg(Color::Cyan)),
+        ])
+    } else if !sel.query.is_empty() {
+        Line::from(Span::styled(
+            format!("/ {}", sel.query),
+            Style::default().fg(Color::Gray),
+        ))
+    } else {
+        Line::from(Span::styled(
+            "type to filter authors",
             Style::default().fg(Color::DarkGray),
         ))
     };

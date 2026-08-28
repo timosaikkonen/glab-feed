@@ -286,6 +286,10 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
         handle_selector_key(app, key, channels);
         return;
     }
+    if app.author_selector.is_some() {
+        handle_author_selector_key(app, key);
+        return;
+    }
     if app.mr_search_active {
         handle_mr_search_key(app, key);
         return;
@@ -334,6 +338,8 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
             (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.select_next(),
             (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.select_prev(),
             (KeyCode::Char('m'), _) => app.toggle_mine(),
+            (KeyCode::Char('a'), _) => app.open_author_selector(),
+            (KeyCode::Char('f'), _) => app.clear_filters(),
             (KeyCode::Char('s'), _) => {
                 app.open_selector();
                 if let Some(sel) = app.selector.as_ref() {
@@ -371,6 +377,56 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
             (KeyCode::Char('/'), _) => app.enter_mr_search(),
             _ => {}
         },
+    }
+}
+
+fn handle_author_selector_key(app: &mut App, key: KeyEvent) {
+    if app.author_selector.as_ref().is_some_and(|s| s.search_active) {
+        if let Some(sel) = app.author_selector.as_mut() {
+            match (key.code, key.modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+                (KeyCode::Enter, _) => sel.exit_search(false),
+                (KeyCode::Esc, _) => sel.exit_search(true),
+                (KeyCode::Backspace, _) => sel.backspace_query(),
+                (KeyCode::Char(c), _) => sel.push_query_char(c),
+                _ => {}
+            }
+        }
+        return;
+    }
+
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => app.close_author_selector(false),
+        (KeyCode::Char('/'), _) => {
+            if let Some(sel) = app.author_selector.as_mut() {
+                sel.enter_search();
+            }
+        }
+        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => {
+            if let Some(sel) = app.author_selector.as_mut() {
+                sel.move_down();
+            }
+        }
+        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => {
+            if let Some(sel) = app.author_selector.as_mut() {
+                sel.move_up();
+            }
+        }
+        (KeyCode::Char(' '), _) => {
+            if let Some(sel) = app.author_selector.as_mut() {
+                sel.toggle();
+            }
+        }
+        (KeyCode::Enter, _) => app.close_author_selector(true),
+        _ => {
+            if let KeyCode::Char(c) = key.code {
+                if let Some(sel) = app.author_selector.as_mut() {
+                    sel.search_active = true;
+                    sel.push_query_char(c);
+                }
+            }
+        }
     }
 }
 

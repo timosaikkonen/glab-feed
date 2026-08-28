@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use ratatui::widgets::TableState;
@@ -100,13 +100,96 @@ impl CopiedKind {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct AuthorEntry {
+    pub username: String,
+    pub name: String,
+}
+
+/// Multi-select author picker for the MR list.
+pub struct AuthorSelector {
+    pub authors: Vec<AuthorEntry>,
+    pub selected: HashSet<String>,
+    pub cursor: usize,
+    pub query: String,
+    pub search_active: bool,
+}
+
+impl AuthorSelector {
+    pub fn new(authors: Vec<AuthorEntry>, selected: HashSet<String>) -> Self {
+        AuthorSelector {
+            authors,
+            selected,
+            cursor: 0,
+            query: String::new(),
+            search_active: false,
+        }
+    }
+
+    pub fn visible(&self) -> Vec<&AuthorEntry> {
+        if self.query.is_empty() {
+            return self.authors.iter().collect();
+        }
+        let needle = self.query.to_lowercase();
+        self.authors
+            .iter()
+            .filter(|a| {
+                a.username.to_lowercase().contains(&needle)
+                    || a.name.to_lowercase().contains(&needle)
+            })
+            .collect()
+    }
+
+    pub fn enter_search(&mut self) {
+        self.search_active = true;
+    }
+
+    pub fn exit_search(&mut self, clear: bool) {
+        self.search_active = false;
+        if clear {
+            self.query.clear();
+            self.cursor = 0;
+        }
+    }
+
+    pub fn push_query_char(&mut self, c: char) {
+        self.query.push(c);
+        self.cursor = 0;
+    }
+
+    pub fn backspace_query(&mut self) {
+        self.query.pop();
+        self.cursor = 0;
+    }
+
+    pub fn move_up(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
+    pub fn move_down(&mut self) {
+        if self.cursor + 1 < self.visible().len() {
+            self.cursor += 1;
+        }
+    }
+
+    pub fn toggle(&mut self) {
+        if let Some(a) = self.visible().get(self.cursor) {
+            let username = a.username.clone();
+            if !self.selected.remove(&username) {
+                self.selected.insert(username);
+            }
+        }
+    }
+}
+
 pub struct App {
     pub host: String,
     pub repos: Vec<RepoCfg>,
     pub repo_states: Vec<RepoState>,
     pub selected_tab: usize,
     pub table_state: TableState,
-    pub mine_only: bool,
+    /// When non-empty, only MRs from these author usernames are shown.
+    pub author_filter: HashSet<String>,
     pub current_user: String,
     pub next_poll: Instant,
     pub fetching: bool,
@@ -125,6 +208,7 @@ pub struct App {
     /// Incremental filter on MR title / IID in the main table.
     pub mr_query: String,
     pub mr_search_active: bool,
+    pub author_selector: Option<AuthorSelector>,
     pub show_help: bool,
     /// When set, the footer shows a copy confirmation until this instant.
     pub copied: Option<(CopiedKind, Instant)>,
@@ -152,7 +236,7 @@ impl App {
             repo_states,
             selected_tab: 0,
             table_state: TableState::default(),
-            mine_only: false,
+            author_filter: HashSet::new(),
             current_user,
             next_poll: Instant::now() + POLL_INTERVAL,
             fetching: true,
@@ -166,6 +250,7 @@ impl App {
             fatal_error: None,
             mr_query: String::new(),
             mr_search_active: false,
+            author_selector: None,
             show_help: false,
             copied: None,
             cmux_available,
@@ -293,7 +378,7 @@ impl App {
         self.current_user = user;
     }
 
-    /// MRs for the current tab, with mine-only and title/IID filters applied.
+    /// MRs for the current tab, with author and title/IID filters applied.
     pub fn visible_mrs(&self) -> Vec<&MergeRequest> {
         let Some(state) = self.repo_states.get(self.selected_tab) else {
             return Vec::new();
@@ -301,11 +386,58 @@ impl App {
         state
             .mrs
             .iter()
-            .filter(|mr| !self.mine_only || mr.author_username == self.current_user)
+            .filter(|mr| {
+                self.author_filter.is_empty()
+                    || self.author_filter.contains(&mr.author_username)
+            })
             .filter(|mr| self.mr_matches_query(mr))
             .collect()
     }
 
+    pub fn clear_filters(&mut self) {
+        self.author_filter.clear();
+        self.mr_query.clear();
+        self.mr_search_active = false;
+        self.reset_selection();
+    }
+
+    fn collect_authors_for_current_tab(&self) -> Vec<AuthorEntry> {
+        let Some(state) = self.repo_states.get(self.selected_tab) else {
+            return Vec::new();
+        };
+        let mut by_username: HashMap<String, String> = HashMap::new();
+        for mr in &state.mrs {
+            by_username
+                .entry(mr.author_username.clone())
+                .or_insert_with(|| mr.author_name.clone());
+        }
+        let mut authors: Vec<AuthorEntry> = by_username
+            .into_iter()
+            .map(|(username, name)| AuthorEntry { username, name })
+            .collect();
+        authors.sort_by(|a, b| {
+            a.username
+                .to_lowercase()
+                .cmp(&b.username.to_lowercase())
+        });
+        authors
+    }
+
+    pub fn open_author_selector(&mut self) {
+        let authors = self.collect_authors_for_current_tab();
+        self.author_selector = Some(AuthorSelector::new(authors, self.author_filter.clone()));
+    }
+
+    pub fn close_author_selector(&mut self, apply: bool) {
+        if apply {
+            if let Some(sel) = self.author_selector.take() {
+                self.author_filter = sel.selected;
+                self.reset_selection();
+            }
+        } else {
+            self.author_selector = None;
+        }
+    }
     fn mr_matches_query(&self, mr: &MergeRequest) -> bool {
         if self.mr_query.is_empty() {
             return true;
@@ -526,7 +658,17 @@ impl App {
     }
 
     pub fn toggle_mine(&mut self) {
-        self.mine_only = !self.mine_only;
+        let only_me = self.author_filter.len() == 1
+            && self
+                .author_filter
+                .contains(&self.current_user)
+                && !self.current_user.is_empty();
+        if only_me {
+            self.author_filter.clear();
+        } else if !self.current_user.is_empty() {
+            self.author_filter.clear();
+            self.author_filter.insert(self.current_user.clone());
+        }
         self.reset_selection();
     }
 
