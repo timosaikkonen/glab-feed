@@ -283,9 +283,7 @@ pub async fn poll(
                     }
                 }
             }
-            Err((path, e)) => {
-                eprintln!("warning: discover MRs for {path} failed: {e}");
-            }
+            Err((_path, _e)) => {}
         }
     }
 
@@ -324,15 +322,14 @@ pub async fn poll(
                     }
                     new_items.extend(notes);
                 }
-                Err(e) => eprintln!("warning: notes fetch failed: {e}"),
+                Err(_e) => {}
             }
         }
     }
 
-    let todos = gitlab::fetch_pending_todos(host).await.unwrap_or_else(|e| {
-        eprintln!("warning: todo list failed: {e}");
-        Vec::new()
-    });
+    let todos = gitlab::fetch_pending_todos(host)
+        .await
+        .unwrap_or_default();
     let max_todo_id = todos
         .iter()
         .map(|t| t.id)

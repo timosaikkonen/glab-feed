@@ -91,7 +91,7 @@ pub fn spawn(
                             }))
                             .await;
                     }
-                    Err(e) => eprintln!("warning: notification poll failed: {e}"),
+                    Err(_e) => {}
                 }
             }));
         }

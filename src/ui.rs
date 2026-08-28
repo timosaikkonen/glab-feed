@@ -11,7 +11,7 @@ use ratatui::{
 /// Secondary text on the second line of two-line MR rows (author, last comment).
 const MR_SECONDARY: Color = Color::DarkGray;
 
-// Nerd Font glyphs (Font Awesome set): check, times, refresh, ban, build, note, push.
+// Nerd Font glyphs: Font Awesome (check, times, …) and Codicons (git_branch_conflicts).
 const NF_CHECK: &str = "\u{f00c}";
 const NF_TIMES: &str = "\u{f00d}";
 const NF_REFRESH: &str = "\u{f021}";
@@ -19,6 +19,7 @@ const NF_BAN: &str = "\u{f05e}";
 const NF_BUILD: &str = "\u{f085}";
 const NF_NOTE: &str = "\u{f075}";
 const NF_PUSH: &str = "\u{f126}";
+const NF_GIT_BRANCH_CONFLICTS: &str = "\u{ec6e}";
 
 fn update_activity_glyph(activity: UpdateActivity) -> &'static str {
     match activity {
@@ -281,10 +282,18 @@ fn build_row(mr: &MergeRequest, selected: bool) -> Row<'static> {
     } else {
         ("Open", Color::Cyan)
     };
-    let status_cell = Cell::from(Text::from(vec![Line::from(Span::styled(
+    let mut status_spans = vec![Span::styled(
         status_text,
         Style::default().fg(status_color),
-    ))]));
+    )];
+    if mr.has_conflicts {
+        status_spans.push(Span::raw(" "));
+        status_spans.push(Span::styled(
+            NF_GIT_BRANCH_CONFLICTS,
+            Style::default().fg(Color::Red),
+        ));
+    }
+    let status_cell = Cell::from(Text::from(vec![Line::from(status_spans)]));
 
     // CI cell.
     let (ci_text, ci_color) = match &mr.ci {

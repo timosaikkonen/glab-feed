@@ -31,6 +31,7 @@ pub struct MergeRequest {
     pub author_username: String,
     pub approved: bool,
     pub draft: bool,
+    pub has_conflicts: bool,
     pub notes_count: u32,
     pub last_note_author: Option<String>,
     pub last_note_at: Option<DateTime<Utc>>,
@@ -79,7 +80,7 @@ query($fullPath: ID!) {
   project(fullPath: $fullPath) {
     mergeRequests(state: opened, sort: UPDATED_DESC, first: 50) {
       nodes {
-        iid title webUrl draft createdAt updatedAt
+        iid title webUrl draft conflicts createdAt updatedAt
         author { username name }
         approvedBy { nodes { username } }
         userNotesCount
@@ -129,6 +130,7 @@ struct MrNode {
     #[serde(rename = "webUrl")]
     web_url: String,
     draft: bool,
+    conflicts: bool,
     #[serde(rename = "createdAt")]
     created_at: DateTime<Utc>,
     #[serde(rename = "updatedAt")]
@@ -323,6 +325,7 @@ pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<Mer
                 // MR as approved only when someone has actually approved it.
                 approved: !n.approved_by.nodes.is_empty(),
                 draft: n.draft,
+                has_conflicts: n.conflicts,
                 notes_count: n.user_notes_count,
                 last_note_author: last_human
                     .and_then(|note| note.author.as_ref().map(|a| a.username.clone())),
