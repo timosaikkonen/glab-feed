@@ -66,6 +66,16 @@ pub struct PollUpdate {
 pub struct NotificationUpdate {
     pub store: NotificationStore,
     pub new_count: usize,
+    pub new_items: Vec<Notification>,
+}
+
+/// A new approval on one of the current user's merge requests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalEvent {
+    pub approver: String,
+    pub repo: String,
+    pub mr_iid: String,
+    pub title: String,
 }
 
 /// Lifecycle events from the background poller.
@@ -214,8 +224,12 @@ pub struct App {
     pub copied: Option<(CopiedKind, Instant)>,
     /// Whether `cmux` is on PATH (enables Opt-Enter to open in a split).
     pub cmux_available: bool,
+    /// Whether to send cmux notifications (cmux on PATH and running inside cmux).
+    pub cmux_notify_enabled: bool,
     /// Last `surface_ref` from `cmux --json browser open`, reused when still a browser.
     pub cmux_surface_ref: Option<String>,
+    /// Key: "{repo_path}/{iid}" → known approver usernames. Seeded on first poll.
+    mr_approvers: HashMap<String, HashSet<String>>,
     pub notification_store: NotificationStore,
     pub notification_list_state: TableState,
     pub new_notification_count: usize,
@@ -227,6 +241,7 @@ impl App {
         repos: Vec<RepoCfg>,
         current_user: String,
         cmux_available: bool,
+        cmux_notify_enabled: bool,
     ) -> Self {
         let repo_states = vec![RepoState::default(); repos.len()];
         let notification_store = NotificationStore::load();
@@ -254,7 +269,9 @@ impl App {
             show_help: false,
             copied: None,
             cmux_available,
+            cmux_notify_enabled,
             cmux_surface_ref: None,
+            mr_approvers: HashMap::new(),
             notification_store,
             notification_list_state: TableState::default(),
             new_notification_count: 0,
@@ -491,9 +508,10 @@ impl App {
         self.poll_error = None;
     }
 
-    pub fn handle_poll_finished(&mut self, update: PollUpdate) {
+    pub fn handle_poll_finished(&mut self, update: PollUpdate) -> Vec<ApprovalEvent> {
         let mut failures = 0;
         let mut total = 0;
+        let mut approvals = Vec::new();
         for (path, result) in update.results.into_iter() {
             total += 1;
             let Some(idx) = self.repos.iter().position(|r| r.path == path) else {
@@ -503,6 +521,12 @@ impl App {
                 state.loaded = true;
                 match result {
                     Ok(mrs) => {
+                        approvals.extend(detect_approval_events(
+                            &path,
+                            &mrs,
+                            &self.current_user,
+                            &mut self.mr_approvers,
+                        ));
                         state.mrs = mrs;
                         state.error = None;
                     }
@@ -525,6 +549,7 @@ impl App {
             None
         };
         self.clamp_selection();
+        approvals
     }
 
     pub fn handle_notifications_updated(&mut self, update: NotificationUpdate) {
@@ -537,6 +562,7 @@ impl App {
     pub fn set_repos(&mut self, repos: Vec<RepoCfg>) {
         self.repos = repos;
         self.repo_states = vec![RepoState::default(); self.repos.len()];
+        self.mr_approvers.clear();
         if self.selected_tab >= self.tab_count() {
             self.selected_tab = self.tab_count().saturating_sub(1);
         }
@@ -759,5 +785,101 @@ impl App {
             None => self.table_state.select(Some(0)),
             _ => {}
         }
+    }
+}
+
+/// Detect new approvers on the current user's MRs since the last poll.
+fn detect_approval_events(
+    repo_path: &str,
+    mrs: &[MergeRequest],
+    current_user: &str,
+    mr_approvers: &mut HashMap<String, HashSet<String>>,
+) -> Vec<ApprovalEvent> {
+    if current_user.is_empty() {
+        return Vec::new();
+    }
+
+    let mut events = Vec::new();
+    for mr in mrs {
+        if mr.author_username != current_user {
+            continue;
+        }
+        let key = format!("{repo_path}/{}", mr.iid);
+        let current: HashSet<String> = mr.approved_by.iter().cloned().collect();
+        if let Some(prev) = mr_approvers.get(&key) {
+            for approver in current.difference(prev) {
+                events.push(ApprovalEvent {
+                    approver: approver.clone(),
+                    repo: repo_path.to_string(),
+                    mr_iid: mr.iid.clone(),
+                    title: mr.title.clone(),
+                });
+            }
+        }
+        mr_approvers.insert(key, current);
+    }
+    events
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn sample_mr(author: &str, iid: &str, approved_by: Vec<&str>) -> MergeRequest {
+        let approved = !approved_by.is_empty();
+        MergeRequest {
+            iid: iid.to_string(),
+            title: format!("MR {iid}"),
+            web_url: String::new(),
+            author_name: String::new(),
+            author_username: author.to_string(),
+            approved_by: approved_by.into_iter().map(str::to_string).collect(),
+            approved,
+            draft: false,
+            has_conflicts: false,
+            notes_count: 0,
+            last_note_author: None,
+            last_note_at: None,
+            ci: crate::gitlab::CiStatus::None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            last_update: None,
+        }
+    }
+
+    #[test]
+    fn first_poll_seeds_approvers_without_events() {
+        let mut mr_approvers = HashMap::new();
+        let mrs = vec![sample_mr("alice", "1", vec!["bob"])];
+        let events = detect_approval_events("group/repo", &mrs, "alice", &mut mr_approvers);
+        assert!(events.is_empty());
+        assert_eq!(
+            mr_approvers.get("group/repo/1").unwrap(),
+            &HashSet::from(["bob".to_string()])
+        );
+    }
+
+    #[test]
+    fn new_approver_emits_event() {
+        let mut mr_approvers = HashMap::from([(
+            "group/repo/1".to_string(),
+            HashSet::from(["alice".to_string()]),
+        )]);
+        let mrs = vec![sample_mr("me", "1", vec!["alice", "bob"])];
+        let events = detect_approval_events("group/repo", &mrs, "me", &mut mr_approvers);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].approver, "bob");
+        assert_eq!(events[0].repo, "group/repo");
+        assert_eq!(events[0].mr_iid, "1");
+    }
+
+    #[test]
+    fn ignores_other_authors_mrs() {
+        let mut mr_approvers = HashMap::new();
+        let mrs = vec![sample_mr("other", "1", vec!["bob"])];
+        let events = detect_approval_events("group/repo", &mrs, "me", &mut mr_approvers);
+        assert!(events.is_empty());
+        assert!(mr_approvers.is_empty());
     }
 }

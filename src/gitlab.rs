@@ -29,6 +29,7 @@ pub struct MergeRequest {
     pub web_url: String,
     pub author_name: String,
     pub author_username: String,
+    pub approved_by: Vec<String>,
     pub approved: bool,
     pub draft: bool,
     pub has_conflicts: bool,
@@ -314,16 +315,23 @@ pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<Mer
                 Some(u) => (u.username, u.name.unwrap_or_default()),
                 None => (String::new(), String::new()),
             };
+            let approved_by = n
+                .approved_by
+                .nodes
+                .iter()
+                .map(|u| u.username.clone())
+                .collect::<Vec<_>>();
             MergeRequest {
                 iid: n.iid,
                 title: n.title,
                 web_url: n.web_url,
                 author_username: author,
                 author_name: name,
+                approved_by: approved_by.clone(),
                 // `MergeRequest.approved` is true whenever approval requirements
                 // are met, including when zero approvals are required. Treat an
                 // MR as approved only when someone has actually approved it.
-                approved: !n.approved_by.nodes.is_empty(),
+                approved: !approved_by.is_empty(),
                 draft: n.draft,
                 has_conflicts: n.conflicts,
                 notes_count: n.user_notes_count,

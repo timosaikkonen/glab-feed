@@ -14,9 +14,9 @@ use futures::StreamExt;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
-use app::{App, CopiedKind, PollEvent, SelectorUpdate};
+use app::{App, ApprovalEvent, CopiedKind, PollEvent, SelectorUpdate};
 use config::RepoCfg;
-use notifications::NotificationStore;
+use notifications::{Notification, NotificationStore};
 use selector::RepoFilter;
 
 /// Shared channels the event loop needs when handling keys.
@@ -61,6 +61,7 @@ async fn main() -> Result<()> {
         repos.clone(),
         current_user.clone(),
         cmux_available(),
+        cmux_notify_enabled(),
     );
     if cfg.is_none() {
         app.start_setup();
@@ -141,8 +142,20 @@ async fn run(
             Some(event) = updates.recv() => {
                 match event {
                     PollEvent::Started => app.handle_poll_started(),
-                    PollEvent::Finished(update) => app.handle_poll_finished(update),
+                    PollEvent::Finished(update) => {
+                        let approvals = app.handle_poll_finished(update);
+                        if app.cmux_notify_enabled {
+                            for a in &approvals {
+                                cmux_notify_for_approval(a);
+                            }
+                        }
+                    }
                     PollEvent::NotificationsUpdated(update) => {
+                        if app.cmux_notify_enabled {
+                            for n in &update.new_items {
+                                cmux_notify_for_notification(n);
+                            }
+                        }
                         app.handle_notifications_updated(update);
                     }
                 }
@@ -194,6 +207,43 @@ fn cmux_available() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn cmux_notify_enabled() -> bool {
+    cmux_available() && std::env::var("CMUX_WORKSPACE_ID").is_ok()
+}
+
+fn cmux_notify(title: &str, subtitle: &str, body: &str) {
+    let _ = std::process::Command::new("cmux")
+        .args(["notify", "--title", title, "--subtitle", subtitle, "--body", body])
+        .spawn();
+}
+
+fn notification_notify_parts(n: &Notification) -> (&'static str, String, String) {
+    let subtitle = format!("@{} {}", n.author, n.kind.verb());
+    let mr_ref = n.mr_iid.as_ref().map(|i| format!("!{i}")).unwrap_or_default();
+    let body = if mr_ref.is_empty() {
+        format!("{}: {}", n.repo, n.summary)
+    } else {
+        format!("{} {}: {}", n.repo, mr_ref, n.summary)
+    };
+    ("glab-feed", subtitle, body)
+}
+
+fn approval_notify_parts(a: &ApprovalEvent) -> (&'static str, String, String) {
+    let subtitle = format!("@{} approved", a.approver);
+    let body = format!("{} !{}: {}", a.repo, a.mr_iid, a.title);
+    ("glab-feed", subtitle, body)
+}
+
+fn cmux_notify_for_notification(n: &Notification) {
+    let (title, subtitle, body) = notification_notify_parts(n);
+    cmux_notify(title, &subtitle, &body);
+}
+
+fn cmux_notify_for_approval(a: &ApprovalEvent) {
+    let (title, subtitle, body) = approval_notify_parts(a);
+    cmux_notify(title, &subtitle, &body);
 }
 
 #[derive(Deserialize)]
@@ -545,5 +595,44 @@ fn handle_selector_key(app: &mut App, key: KeyEvent, channels: &Channels) {
             app.close_selector();
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use notifications::NotificationKind;
+
+    #[test]
+    fn notification_notify_parts_formats_body() {
+        let n = Notification {
+            id: "note:1".to_string(),
+            kind: NotificationKind::Comment,
+            at: Utc::now(),
+            author: "alice".to_string(),
+            summary: "Looks good".to_string(),
+            url: String::new(),
+            repo: "group/repo".to_string(),
+            mr_iid: Some("42".to_string()),
+        };
+        let (title, subtitle, body) = notification_notify_parts(&n);
+        assert_eq!(title, "glab-feed");
+        assert_eq!(subtitle, "@alice commented");
+        assert_eq!(body, "group/repo !42: Looks good");
+    }
+
+    #[test]
+    fn approval_notify_parts_formats_body() {
+        let a = ApprovalEvent {
+            approver: "bob".to_string(),
+            repo: "group/repo".to_string(),
+            mr_iid: "7".to_string(),
+            title: "Add feature".to_string(),
+        };
+        let (title, subtitle, body) = approval_notify_parts(&a);
+        assert_eq!(title, "glab-feed");
+        assert_eq!(subtitle, "@bob approved");
+        assert_eq!(body, "group/repo !7: Add feature");
     }
 }

@@ -81,13 +81,15 @@ pub fn spawn(
             notif_task = Some(tokio::spawn(async move {
                 let mut store = store.lock().await;
                 match crate::notifications::poll(&host, &repos, &user, &mut store).await {
-                    Ok(count) => {
+                    Ok(new_items) => {
+                        let new_count = new_items.len();
                         let updated = store.clone();
                         drop(store);
                         let _ = tx
                             .send(PollEvent::NotificationsUpdated(NotificationUpdate {
                                 store: updated,
-                                new_count: count,
+                                new_count,
+                                new_items,
                             }))
                             .await;
                     }

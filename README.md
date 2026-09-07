@@ -9,6 +9,7 @@ A live-updating terminal UI for GitLab merge requests, built with [ratatui](http
 - Repo tabs across the top, one per configured project, plus a Notifications tab
 - Table of open MRs with title + author, comment count + last commenter, status (draft/open/approved), CI result, and age
 - **Notifications feed** — persistent list of MR comments, reviews, review requests, and failed pipelines
+- **cmux notifications** — when running inside [cmux](https://cmux.com), alerts via `cmux notify` for new notification-tab activity and when your MRs get approved
 - Live countdown to the next poll, default sort by most recently updated
 - First-run setup: enter your GitLab host, then pick repos from a filterable tree
 - Interactive repo selector, saved back to `config.toml`

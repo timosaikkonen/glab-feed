@@ -244,15 +244,15 @@ fn collect_new_todos(
 }
 
 /// Poll GitLab for new notifications and update the store.
-/// Returns the number of newly appended items.
+/// Returns newly appended items (empty during the initial seeding poll).
 pub async fn poll(
     host: &str,
     repos: &[RepoCfg],
     current_user: &str,
     store: &mut NotificationStore,
-) -> Result<usize> {
+) -> Result<Vec<Notification>> {
     if current_user.is_empty() || repos.is_empty() {
-        return Ok(0);
+        return Ok(Vec::new());
     }
 
     let seeding = !store.seeded;
@@ -344,15 +344,15 @@ pub async fn poll(
     store.last_todo_id = max_todo_id;
     store.seeded = true;
 
-    let count = new_items.len();
     if !seeding {
-        store.prepend(new_items);
+        let appended = new_items;
+        store.prepend(appended.clone());
         store.save()?;
+        Ok(appended)
     } else {
         store.save()?;
+        Ok(Vec::new())
     }
-
-    Ok(if seeding { 0 } else { count })
 }
 
 #[cfg(test)]
