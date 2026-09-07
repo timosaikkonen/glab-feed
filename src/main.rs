@@ -6,6 +6,7 @@ mod poller;
 mod selector;
 mod ui;
 
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -201,9 +202,19 @@ fn copy_to_clipboard(text: &str) -> bool {
     }
 }
 
+fn spawn_silent(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+}
+
 fn cmux_available() -> bool {
-    std::process::Command::new("sh")
+    Command::new("sh")
         .args(["-c", "command -v cmux >/dev/null 2>&1"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
@@ -214,9 +225,9 @@ fn cmux_notify_enabled() -> bool {
 }
 
 fn cmux_notify(title: &str, subtitle: &str, body: &str) {
-    let _ = std::process::Command::new("cmux")
-        .args(["notify", "--title", title, "--subtitle", subtitle, "--body", body])
-        .spawn();
+    let _ = spawn_silent(
+        Command::new("cmux").args(["notify", "--title", title, "--subtitle", subtitle, "--body", body]),
+    );
 }
 
 fn notification_notify_parts(n: &Notification) -> (&'static str, String, String) {
@@ -286,9 +297,9 @@ fn cmux_browser_surface_exists(surface_ref: &str) -> bool {
 fn open_in_cmux(app: &mut App, url: &str) {
     if let Some(stored) = app.cmux_surface_ref.clone() {
         if cmux_browser_surface_exists(&stored) {
-            let _ = std::process::Command::new("cmux")
-                .args(["--json", "browser", &stored, "open", url])
-                .spawn();
+            let _ = spawn_silent(
+                Command::new("cmux").args(["--json", "browser", &stored, "open", url]),
+            );
             return;
         }
         app.cmux_surface_ref = None;
