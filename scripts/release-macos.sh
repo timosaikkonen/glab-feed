@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Release glab-feed for macOS (native arch) to GitLab.
+# Release glab-feed for macOS (native arch) to GitHub.
 #
 # Usage:
 #   ./scripts/release-macos.sh
@@ -7,12 +7,15 @@
 #   ./scripts/release-macos.sh --dry-run
 #   ./scripts/release-macos.sh --skip-tag   # upload assets only
 #
-# Requires: macOS, git, cargo, glab (authenticated), tar, shasum
+# Requires: macOS, git, cargo, gh (authenticated), tar, shasum
+# Optional:
+#   GH_REPO     owner/name passed to gh -R (default: repo from the git remote)
+#   GIT_REMOTE  remote that receives the tag (default: origin)
 
 set -euo pipefail
 
-GLAB_HOST="${GLAB_HOST:-git.example.com}"
-GLAB_REPO="${GLAB_REPO:-group/glab-feed}"
+GH_REPO="${GH_REPO:-}"
+GIT_REMOTE="${GIT_REMOTE:-origin}"
 BINARY_NAME="glab-feed"
 
 DRY_RUN=false
@@ -64,18 +67,27 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
     exit 1
 fi
 
-for cmd in cargo git glab tar shasum; do
+for cmd in cargo git gh tar shasum; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
         echo "error: required command not found: $cmd" >&2
         exit 1
     fi
 done
 
-if ! glab auth status --hostname "$GLAB_HOST" >/dev/null 2>&1; then
-    echo "error: glab is not authenticated for $GLAB_HOST" >&2
-    echo "Run: glab auth login --hostname $GLAB_HOST" >&2
+if ! gh auth status >/dev/null 2>&1; then
+    echo "error: gh is not authenticated" >&2
+    echo "Run: gh auth login" >&2
     exit 1
 fi
+
+# bash 3.2 errors on "${empty[@]}" under set -u, so append -R only when set.
+gh_in_repo() {
+    if [[ -n "$GH_REPO" ]]; then
+        gh -R "$GH_REPO" "$@"
+    else
+        gh "$@"
+    fi
+}
 
 if ! $ALLOW_DIRTY && [[ -n "$(git status --porcelain)" ]]; then
     echo "error: working tree is not clean (use --allow-dirty to override)" >&2
@@ -159,36 +171,44 @@ if ! $SKIP_TAG; then
     log "Creating annotated tag $TAG"
     run git tag -a "$TAG" -m "Release ${TAG}"
     log "Pushing tag $TAG"
-    run git push origin "$TAG"
+    run git push "$GIT_REMOTE" "$TAG"
 else
     log "Skipping tag creation (--skip-tag)"
 fi
 
-# ----- GitLab release -----
+# ----- GitHub release -----
 
-ASSET_SPEC="${TARBALL}#${ASSET_BASE}.tar.gz#package"
 RELEASE_EXISTS=false
-if glab release view "$TAG" -R "$GLAB_REPO" >/dev/null 2>&1; then
+if gh_in_repo release view "$TAG" >/dev/null 2>&1; then
     RELEASE_EXISTS=true
 fi
 
 if $RELEASE_EXISTS; then
-    log "Release $TAG exists; uploading asset"
+    log "Release $TAG exists; uploading assets"
     if $DRY_RUN; then
-        printf '[dry-run] glab release upload %s -R %s %s\n' "$TAG" "$GLAB_REPO" "$ASSET_SPEC"
+        printf '[dry-run] gh release upload %s' "$TAG"
+        if [[ -n "$GH_REPO" ]]; then
+            printf ' -R %s' "$GH_REPO"
+        fi
+        printf ' %s %s --clobber\n' "$TARBALL" "$CHECKSUM"
     else
-        glab release upload "$TAG" -R "$GLAB_REPO" "$ASSET_SPEC"
+        gh_in_repo release upload "$TAG" "$TARBALL" "$CHECKSUM" --clobber
     fi
 else
-    log "Creating GitLab release $TAG"
+    log "Creating GitHub release $TAG"
     if $DRY_RUN; then
-        printf '[dry-run] glab release create %s -R %s --name ... --notes-file ... %s\n' \
-            "$TAG" "$GLAB_REPO" "$ASSET_SPEC"
+        printf '[dry-run] gh release create %s' "$TAG"
+        if [[ -n "$GH_REPO" ]]; then
+            printf ' -R %s' "$GH_REPO"
+        fi
+        printf ' --verify-tag --title ... --notes-file ... %s %s\n' "$TARBALL" "$CHECKSUM"
     else
-        glab release create "$TAG" -R "$GLAB_REPO" \
-            --name "${BINARY_NAME} v${VERSION}" \
+        gh_in_repo release create "$TAG" \
+            --verify-tag \
+            --title "${BINARY_NAME} v${VERSION}" \
             --notes-file "$RELEASE_NOTES" \
-            "$ASSET_SPEC"
+            "$TARBALL" \
+            "$CHECKSUM"
     fi
 fi
 
@@ -201,6 +221,10 @@ echo "  $CHECKSUM"
 if ! $DRY_RUN; then
     echo ""
     echo "Release page:"
-    glab release view "$TAG" -R "$GLAB_REPO" --web 2>/dev/null || \
-        echo "  https://${GLAB_HOST}/${GLAB_REPO}/-/releases/${TAG}"
+    if [[ -n "$GH_REPO" ]]; then
+        echo "  https://github.com/${GH_REPO}/releases/tag/${TAG}"
+    fi
+    gh_in_repo release view "$TAG" --json url --jq .url 2>/dev/null \
+        || gh_in_repo release view "$TAG" --web 2>/dev/null \
+        || true
 fi
