@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod demo;
 mod gitlab;
 mod notifications;
 mod poller;
@@ -37,6 +38,10 @@ struct Channels {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if std::env::args().any(|a| a == "--demo") {
+        return run_demo().await;
+    }
+
     // Missing config -> first-run setup inside the TUI. A present-but-invalid
     // config is a hard error.
     let cfg = if config::config_path().exists() {
@@ -124,6 +129,51 @@ async fn main() -> Result<()> {
         eprintln!("{err}");
         std::process::exit(1);
     }
+    result
+}
+
+async fn run_demo() -> Result<()> {
+    let mut app = demo::app();
+    let (refresh_tx, _refresh_rx) = mpsc::channel::<()>(1);
+    let (reconfigure_tx, _reconfigure_rx) = mpsc::channel::<(String, Vec<RepoCfg>)>(1);
+    let (selector_res_tx, mut selector_res_rx) = mpsc::channel::<SelectorUpdate>(4);
+    let (user_res_tx, mut user_res_rx) = mpsc::channel::<String>(1);
+    let (user_poll_tx, _user_poll_rx) = mpsc::channel::<String>(1);
+    let mut updates = mpsc::channel::<PollEvent>(1).1;
+    let channels = Channels {
+        refresh_tx,
+        reconfigure_tx,
+        selector_res_tx,
+        user_res_tx,
+        user_poll_tx,
+    };
+
+    // Draw on the main screen so a terminal recorder can capture the frame.
+    // The normal app uses the alternate screen, which those recorders miss.
+    let mut terminal = ratatui::init_with_options(ratatui::TerminalOptions {
+        viewport: ratatui::Viewport::Fullscreen,
+    });
+    terminal.clear()?;
+    let _ = execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+        ),
+    );
+    let result = {
+        let _pop_keyboard = PopKeyboardOnDrop;
+        run(
+            &mut terminal,
+            &mut app,
+            &mut updates,
+            &mut selector_res_rx,
+            &mut user_res_rx,
+            &channels,
+        )
+        .await
+    };
+    ratatui::restore();
     result
 }
 
