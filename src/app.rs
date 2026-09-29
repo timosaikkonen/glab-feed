@@ -404,8 +404,7 @@ impl App {
             .mrs
             .iter()
             .filter(|mr| {
-                self.author_filter.is_empty()
-                    || self.author_filter.contains(&mr.author_username)
+                self.author_filter.is_empty() || self.author_filter.contains(&mr.author_username)
             })
             .filter(|mr| self.mr_matches_query(mr))
             .collect()
@@ -432,11 +431,7 @@ impl App {
             .into_iter()
             .map(|(username, name)| AuthorEntry { username, name })
             .collect();
-        authors.sort_by(|a, b| {
-            a.username
-                .to_lowercase()
-                .cmp(&b.username.to_lowercase())
-        });
+        authors.sort_by(|a, b| a.username.to_lowercase().cmp(&b.username.to_lowercase()));
         authors
     }
 
@@ -685,10 +680,8 @@ impl App {
 
     pub fn toggle_mine(&mut self) {
         let only_me = self.author_filter.len() == 1
-            && self
-                .author_filter
-                .contains(&self.current_user)
-                && !self.current_user.is_empty();
+            && self.author_filter.contains(&self.current_user)
+            && !self.current_user.is_empty();
         if only_me {
             self.author_filter.clear();
         } else if !self.current_user.is_empty() {

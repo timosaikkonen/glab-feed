@@ -225,14 +225,24 @@ fn cmux_notify_enabled() -> bool {
 }
 
 fn cmux_notify(title: &str, subtitle: &str, body: &str) {
-    let _ = spawn_silent(
-        Command::new("cmux").args(["notify", "--title", title, "--subtitle", subtitle, "--body", body]),
-    );
+    let _ = spawn_silent(Command::new("cmux").args([
+        "notify",
+        "--title",
+        title,
+        "--subtitle",
+        subtitle,
+        "--body",
+        body,
+    ]));
 }
 
 fn notification_notify_parts(n: &Notification) -> (&'static str, String, String) {
     let subtitle = format!("@{} {}", n.author, n.kind.verb());
-    let mr_ref = n.mr_iid.as_ref().map(|i| format!("!{i}")).unwrap_or_default();
+    let mr_ref = n
+        .mr_iid
+        .as_ref()
+        .map(|i| format!("!{i}"))
+        .unwrap_or_default();
     let body = if mr_ref.is_empty() {
         format!("{}: {}", n.repo, n.summary)
     } else {
@@ -442,7 +452,11 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
 }
 
 fn handle_author_selector_key(app: &mut App, key: KeyEvent) {
-    if app.author_selector.as_ref().is_some_and(|s| s.search_active) {
+    if app
+        .author_selector
+        .as_ref()
+        .is_some_and(|s| s.search_active)
+    {
         if let Some(sel) = app.author_selector.as_mut() {
             match (key.code, key.modifiers) {
                 (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,

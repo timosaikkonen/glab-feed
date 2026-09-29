@@ -93,8 +93,7 @@ pub async fn fetch_projects(host: &str, filter: RepoFilter) -> Result<Vec<Projec
         if line.is_empty() {
             continue;
         }
-        let raw: RawProject =
-            serde_json::from_str(line).context("parsing project ndjson line")?;
+        let raw: RawProject = serde_json::from_str(line).context("parsing project ndjson line")?;
         projects.push(Project {
             path_with_namespace: raw.path_with_namespace,
             name: raw.name,

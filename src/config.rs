@@ -58,8 +58,8 @@ pub fn load() -> Result<Config> {
     }
     let raw = std::fs::read_to_string(&path)
         .with_context(|| format!("reading config at {}", path.display()))?;
-    let cfg: Config = toml::from_str(&raw)
-        .with_context(|| format!("parsing config at {}", path.display()))?;
+    let cfg: Config =
+        toml::from_str(&raw).with_context(|| format!("parsing config at {}", path.display()))?;
     if cfg.repos.is_empty() {
         anyhow::bail!("config at {} lists no [[repos]]", path.display());
     }
@@ -101,13 +101,20 @@ mod tests {
     fn parses_various_remote_urls() {
         let cases = [
             ("git@git.example.com:group/repo.git", "git.example.com"),
-            ("ssh://git@git.example.com:22/group/repo.git", "git.example.com"),
+            (
+                "ssh://git@git.example.com:22/group/repo.git",
+                "git.example.com",
+            ),
             ("https://gitlab.com/group/repo", "gitlab.com"),
             ("https://gitlab.com", "gitlab.com"),
             ("  gitlab.com  ", "gitlab.com"),
         ];
         for (input, expected) in cases {
-            assert_eq!(parse_host(input).as_deref(), Some(expected), "input: {input}");
+            assert_eq!(
+                parse_host(input).as_deref(),
+                Some(expected),
+                "input: {input}"
+            );
         }
         assert_eq!(parse_host(""), None);
     }
@@ -120,7 +127,6 @@ pub fn save(cfg: &Config) -> Result<()> {
             .with_context(|| format!("creating config dir {}", parent.display()))?;
     }
     let toml = toml::to_string_pretty(cfg).context("serializing config")?;
-    std::fs::write(&path, toml)
-        .with_context(|| format!("writing config at {}", path.display()))?;
+    std::fs::write(&path, toml).with_context(|| format!("writing config at {}", path.display()))?;
     Ok(())
 }

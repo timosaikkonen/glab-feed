@@ -11,11 +11,7 @@ use crate::gitlab::{self, MrCandidate, RestTodo};
 pub const MAX_ITEMS: usize = 300;
 const MAX_BODY: usize = 200;
 
-const TODO_ACTIONS: &[&str] = &[
-    "review_requested",
-    "review_submitted",
-    "build_failed",
-];
+const TODO_ACTIONS: &[&str] = &["review_requested", "review_submitted", "build_failed"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -327,9 +323,7 @@ pub async fn poll(
         }
     }
 
-    let todos = gitlab::fetch_pending_todos(host)
-        .await
-        .unwrap_or_default();
+    let todos = gitlab::fetch_pending_todos(host).await.unwrap_or_default();
     let max_todo_id = todos
         .iter()
         .map(|t| t.id)

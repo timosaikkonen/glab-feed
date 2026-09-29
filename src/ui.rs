@@ -4,7 +4,9 @@ use ratatui::{
     layout::{Alignment, Constraint, Flex, Layout, Rect},
     style::{Color, Modifier, Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Cell, Clear, List, ListItem, Padding, Paragraph, Row, Table, Tabs, Wrap},
+    widgets::{
+        Block, Borders, Cell, Clear, List, ListItem, Padding, Paragraph, Row, Table, Tabs, Wrap,
+    },
     Frame,
 };
 
@@ -284,10 +286,7 @@ fn build_row(mr: &MergeRequest, selected: bool) -> Row<'static> {
     } else {
         ("Open", Color::Cyan)
     };
-    let mut status_spans = vec![Span::styled(
-        status_text,
-        Style::default().fg(status_color),
-    )];
+    let mut status_spans = vec![Span::styled(status_text, Style::default().fg(status_color))];
     if mr.has_conflicts {
         status_spans.push(Span::raw(" "));
         status_spans.push(Span::styled(
@@ -507,11 +506,7 @@ fn render_footer(f: &mut Frame, app: &App, area: Rect) {
         let active = !app.author_filter.is_empty() || !app.mr_query.is_empty();
         Line::from(Span::styled(
             parts.join("  |  "),
-            Style::default().fg(if active {
-                Color::Green
-            } else {
-                Color::Gray
-            }),
+            Style::default().fg(if active { Color::Green } else { Color::Gray }),
         ))
     };
     f.render_widget(Paragraph::new(status_line), status_cols[0]);
@@ -743,10 +738,7 @@ fn render_author_selector(f: &mut Frame, app: &App) {
     f.render_widget(block, area);
 
     if sel.authors.is_empty() {
-        f.render_widget(
-            Paragraph::new("No authors in this repo yet.").dim(),
-            inner,
-        );
+        f.render_widget(Paragraph::new("No authors in this repo yet.").dim(), inner);
         return;
     }
 

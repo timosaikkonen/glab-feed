@@ -67,7 +67,11 @@ impl CiStatus {
             Some(s) => match s {
                 "SUCCESS" => CiStatus::Pass,
                 "FAILED" => CiStatus::Fail,
-                "RUNNING" | "PENDING" | "CREATED" | "PREPARING" | "SCHEDULED"
+                "RUNNING"
+                | "PENDING"
+                | "CREATED"
+                | "PREPARING"
+                | "SCHEDULED"
                 | "WAITING_FOR_RESOURCE" => CiStatus::InProgress,
                 "CANCELED" | "CANCELLED" => CiStatus::Cancelled,
                 other => CiStatus::Other(other.to_string()),
@@ -253,7 +257,11 @@ fn latest_update(
         if let Some(author) = &note.author {
             best = later(
                 best,
-                (UpdateActivity::Note, author.username.clone(), note.created_at),
+                (
+                    UpdateActivity::Note,
+                    author.username.clone(),
+                    note.created_at,
+                ),
             );
         }
     }
@@ -305,12 +313,7 @@ pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<Mer
         .into_iter()
         .map(|n| {
             // Most recent non-system note = last human commenter.
-            let last_human = n
-                .notes
-                .nodes
-                .iter()
-                .rev()
-                .find(|note| !note.system);
+            let last_human = n.notes.nodes.iter().rev().find(|note| !note.system);
             let (author, name) = match n.author {
                 Some(u) => (u.username, u.name.unwrap_or_default()),
                 None => (String::new(), String::new()),
@@ -343,11 +346,7 @@ pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<Mer
                 ),
                 created_at: n.created_at,
                 updated_at: n.updated_at,
-                last_update: latest_update(
-                    &n.head_pipeline,
-                    last_human,
-                    n.commits.nodes.first(),
-                ),
+                last_update: latest_update(&n.head_pipeline, last_human, n.commits.nodes.first()),
             }
         })
         .collect::<Vec<_>>();
@@ -485,11 +484,7 @@ pub async fn discover_candidate_mrs(
 }
 
 /// Notes on an MR, oldest first.
-pub async fn fetch_mr_notes(
-    host: &str,
-    project_id: u64,
-    iid: u32,
-) -> Result<Vec<RestNote>> {
+pub async fn fetch_mr_notes(host: &str, project_id: u64, iid: u32) -> Result<Vec<RestNote>> {
     let path = format!(
         "projects/{project_id}/merge_requests/{iid}/notes\
          ?sort=asc&order_by=created_at&per_page=100"
@@ -511,11 +506,7 @@ pub async fn fetch_mr_notes(
 }
 
 /// Most recent note id on an MR, if any (used to seed the notification cursor).
-pub async fn fetch_mr_latest_note_id(
-    host: &str,
-    project_id: u64,
-    iid: u32,
-) -> Result<Option<u64>> {
+pub async fn fetch_mr_latest_note_id(host: &str, project_id: u64, iid: u32) -> Result<Option<u64>> {
     let path = format!(
         "projects/{project_id}/merge_requests/{iid}/notes\
          ?sort=desc&order_by=created_at&per_page=1"
