@@ -6,7 +6,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::config::{self, RepoCfg};
-use crate::gitlab::{self, MrCandidate, RestTodo};
+use crate::gitlab::{self, Discussion, MrCandidate, RestTodo};
 
 pub const MAX_ITEMS: usize = 300;
 const MAX_BODY: usize = 200;
@@ -17,6 +17,8 @@ const TODO_ACTIONS: &[&str] = &["review_requested", "review_submitted", "build_f
 #[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
     Comment,
+    /// Someone replied in a thread where the current user had written a note.
+    CommentReply,
     ReviewSubmitted,
     ReviewRequested,
     PipelineFailed,
@@ -26,6 +28,7 @@ impl NotificationKind {
     pub fn verb(self) -> &'static str {
         match self {
             NotificationKind::Comment => "commented",
+            NotificationKind::CommentReply => "replied to your comment",
             NotificationKind::ReviewSubmitted => "reviewed",
             NotificationKind::ReviewRequested => "requested review on",
             NotificationKind::PipelineFailed => "pipeline failed on",
@@ -50,6 +53,10 @@ pub struct NotificationStore {
     pub last_note_id: u64,
     pub last_todo_id: u64,
     pub seeded: bool,
+    /// Cursor for discussion-thread replies has been initialized.
+    /// Missing on stores written before reply tracking existed.
+    #[serde(default)]
+    pub replies_seeded: bool,
     pub items: Vec<Notification>,
 }
 
@@ -59,6 +66,7 @@ impl Default for NotificationStore {
             last_note_id: 0,
             last_todo_id: 0,
             seeded: false,
+            replies_seeded: false,
             items: Vec::new(),
         }
     }
@@ -179,6 +187,66 @@ async fn collect_new_notes(
         });
     }
     Ok(out)
+}
+
+fn user_wrote_in_thread(discussion: &Discussion, current_user: &str) -> bool {
+    discussion
+        .notes
+        .iter()
+        .any(|n| !n.system && n.author_username == current_user)
+}
+
+/// Highest note id in threads the user has written in.
+fn participated_thread_high_water(discussions: &[Discussion], current_user: &str) -> u64 {
+    discussions
+        .iter()
+        .filter(|d| !d.individual_note && user_wrote_in_thread(d, current_user))
+        .flat_map(|d| d.notes.iter().map(|n| n.id))
+        .max()
+        .unwrap_or(0)
+}
+
+/// Replies, in threads the user has written in, that the notes API does not return.
+fn collect_thread_replies(
+    discussions: &[Discussion],
+    candidate: &MrCandidate,
+    last_note_id: u64,
+    current_user: &str,
+) -> Vec<Notification> {
+    let mut out = Vec::new();
+    for discussion in discussions {
+        if discussion.individual_note {
+            continue;
+        }
+        let Some(my_first) = discussion
+            .notes
+            .iter()
+            .filter(|n| !n.system && n.author_username == current_user)
+            .map(|n| n.id)
+            .min()
+        else {
+            continue;
+        };
+        for n in &discussion.notes {
+            if n.system || n.author_username == current_user || n.note_type.is_none() {
+                continue;
+            }
+            if n.id <= last_note_id || n.id <= my_first {
+                continue;
+            }
+            out.push(Notification {
+                id: format!("note:{}", n.id),
+                kind: NotificationKind::CommentReply,
+                at: n.created_at,
+                author: n.author_username.clone(),
+                summary: snippet(&n.body),
+                url: format!("{}#note_{}", candidate.web_url, n.id),
+                repo: candidate.repo_path.clone(),
+                mr_iid: Some(candidate.iid.to_string()),
+            });
+        }
+    }
+    out
 }
 
 fn collect_new_todos(
@@ -323,6 +391,51 @@ pub async fn poll(
         }
     }
 
+    let discussion_futures = candidates.iter().map(|candidate| {
+        let host = host.to_string();
+        let candidate = candidate.clone();
+        async move {
+            gitlab::fetch_mr_discussions(&host, candidate.project_id, candidate.iid)
+                .await
+                .map(|discussions| (candidate, discussions))
+        }
+    });
+    let mut reply_high_water = 0u64;
+    let mut replies = Vec::new();
+    for result in futures::future::join_all(discussion_futures).await {
+        let Ok((candidate, discussions)) = result else {
+            continue;
+        };
+        reply_high_water =
+            reply_high_water.max(participated_thread_high_water(&discussions, current_user));
+        if !seeding && store.replies_seeded {
+            replies.extend(collect_thread_replies(
+                &discussions,
+                &candidate,
+                store.last_note_id,
+                current_user,
+            ));
+        }
+    }
+    if seeding || !store.replies_seeded {
+        max_note_id = max_note_id.max(reply_high_water);
+        store.replies_seeded = true;
+    } else {
+        {
+            let reply_ids: HashSet<&str> = replies.iter().map(|n| n.id.as_str()).collect();
+            new_items.retain(|n| !reply_ids.contains(n.id.as_str()));
+        }
+        for n in &replies {
+            if let Some(id) = n.id.strip_prefix("note:") {
+                if let Ok(num) = id.parse::<u64>() {
+                    max_note_id = max_note_id.max(num);
+                }
+            }
+        }
+        max_note_id = max_note_id.max(reply_high_water);
+        new_items.extend(replies);
+    }
+
     let todos = gitlab::fetch_pending_todos(host).await.unwrap_or_default();
     let max_todo_id = todos
         .iter()
@@ -396,5 +509,108 @@ mod tests {
             Some(NotificationKind::ReviewRequested)
         );
         assert_eq!(todo_kind("mentioned"), None);
+    }
+
+    #[test]
+    fn replies_seeded_defaults_when_missing() {
+        let json = r#"{"last_note_id":1,"last_todo_id":2,"seeded":true,"items":[]}"#;
+        let store: NotificationStore = serde_json::from_str(json).unwrap();
+        assert!(store.seeded);
+        assert!(!store.replies_seeded);
+    }
+
+    fn thread_note(id: u64, author: &str, note_type: Option<&str>) -> gitlab::DiscussionNote {
+        gitlab::DiscussionNote {
+            id,
+            note_type: note_type.map(str::to_string),
+            author_username: author.to_string(),
+            body: format!("body {id}"),
+            created_at: Utc::now(),
+            system: false,
+        }
+    }
+
+    fn candidate() -> MrCandidate {
+        MrCandidate {
+            project_id: 1,
+            iid: 7,
+            web_url: "https://git.example.com/group/repo/-/merge_requests/7".to_string(),
+            repo_path: "group/repo".to_string(),
+        }
+    }
+
+    #[test]
+    fn thread_replies_include_responses_after_my_review_comment() {
+        let discussions = vec![Discussion {
+            individual_note: false,
+            notes: vec![
+                thread_note(10, "me", Some("DiffNote")),
+                thread_note(11, "alice", Some("DiscussionNote")),
+                thread_note(12, "bob", Some("DiffNote")),
+            ],
+        }];
+        let replies = collect_thread_replies(&discussions, &candidate(), 0, "me");
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[0].kind, NotificationKind::CommentReply);
+        assert_eq!(replies[0].author, "alice");
+        assert_eq!(replies[0].id, "note:11");
+        assert_eq!(
+            replies[1].url,
+            "https://git.example.com/group/repo/-/merge_requests/7#note_12"
+        );
+        assert_eq!(
+            NotificationKind::CommentReply.verb(),
+            "replied to your comment"
+        );
+        assert_eq!(participated_thread_high_water(&discussions, "me"), 12);
+    }
+
+    #[test]
+    fn thread_replies_skip_notes_before_i_wrote_and_unrelated_threads() {
+        let discussions = vec![
+            Discussion {
+                individual_note: false,
+                notes: vec![
+                    thread_note(4, "alice", Some("DiffNote")),
+                    thread_note(8, "me", Some("DiscussionNote")),
+                    thread_note(9, "alice", Some("DiscussionNote")),
+                    thread_note(20, "me", Some("DiscussionNote")),
+                ],
+            },
+            Discussion {
+                individual_note: false,
+                notes: vec![thread_note(30, "carol", Some("DiffNote"))],
+            },
+            Discussion {
+                individual_note: true,
+                notes: vec![thread_note(40, "dave", None)],
+            },
+        ];
+        let replies = collect_thread_replies(&discussions, &candidate(), 0, "me");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].id, "note:9");
+        assert_eq!(participated_thread_high_water(&discussions, "me"), 20);
+        assert_eq!(participated_thread_high_water(&discussions, "nobody"), 0);
+    }
+
+    #[test]
+    fn thread_replies_skip_root_comments_and_old_cursor() {
+        let mut system = thread_note(15, "gitlab", Some("DiscussionNote"));
+        system.system = true;
+        let discussions = vec![Discussion {
+            individual_note: false,
+            notes: vec![
+                thread_note(10, "me", Some("DiffNote")),
+                thread_note(11, "alice", None),
+                thread_note(12, "alice", Some("DiscussionNote")),
+                system,
+            ],
+        }];
+        let replies = collect_thread_replies(&discussions, &candidate(), 0, "me");
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].id, "note:12");
+
+        let already_seen = collect_thread_replies(&discussions, &candidate(), 12, "me");
+        assert!(already_seen.is_empty());
     }
 }

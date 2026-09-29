@@ -373,7 +373,7 @@ fn render_mr_search(f: &mut Frame, app: &App, area: Rect) {
 
 fn notification_kind_glyph(kind: NotificationKind) -> (&'static str, Color) {
     match kind {
-        NotificationKind::Comment => (NF_NOTE, Color::Cyan),
+        NotificationKind::Comment | NotificationKind::CommentReply => (NF_NOTE, Color::Cyan),
         NotificationKind::ReviewSubmitted => (NF_CHECK, Color::Green),
         NotificationKind::ReviewRequested => (NF_REFRESH, Color::Yellow),
         NotificationKind::PipelineFailed => (NF_TIMES, Color::Red),

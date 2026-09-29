@@ -509,6 +509,87 @@ pub async fn fetch_mr_notes(host: &str, project_id: u64, iid: u32) -> Result<Vec
         .collect())
 }
 
+#[derive(Debug, Clone)]
+pub struct Discussion {
+    pub individual_note: bool,
+    pub notes: Vec<DiscussionNote>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DiscussionNote {
+    pub id: u64,
+    /// `DiffNote` / `DiscussionNote` for thread notes. `None` for a root comment,
+    /// which the notes API already returns.
+    pub note_type: Option<String>,
+    pub author_username: String,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+    pub system: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestDiscussionRaw {
+    individual_note: bool,
+    notes: Vec<RestDiscussionNoteRaw>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RestDiscussionNoteRaw {
+    id: u64,
+    #[serde(default, rename = "type")]
+    note_type: Option<String>,
+    body: String,
+    system: bool,
+    author: Option<UserRef>,
+    created_at: DateTime<Utc>,
+}
+
+const DISCUSSION_PAGE_SIZE: usize = 100;
+const DISCUSSION_MAX_PAGES: u32 = 10;
+
+/// Discussion threads on an MR, including diff notes and replies.
+///
+/// Those notes are `DiscussionNote`s. The notes API does not return them.
+pub async fn fetch_mr_discussions(
+    host: &str,
+    project_id: u64,
+    iid: u32,
+) -> Result<Vec<Discussion>> {
+    let mut all = Vec::new();
+    for page in 1..=DISCUSSION_MAX_PAGES {
+        let path = format!(
+            "projects/{project_id}/merge_requests/{iid}/discussions\
+             ?per_page={DISCUSSION_PAGE_SIZE}&page={page}"
+        );
+        let raw: Vec<RestDiscussionRaw> = run_rest(host, &path).await?;
+        let count = raw.len();
+        all.extend(raw.into_iter().map(|d| {
+            Discussion {
+                individual_note: d.individual_note,
+                notes: d
+                    .notes
+                    .into_iter()
+                    .map(|n| DiscussionNote {
+                        id: n.id,
+                        note_type: n.note_type,
+                        author_username: n
+                            .author
+                            .map(|a| a.username)
+                            .unwrap_or_else(|| "unknown".to_string()),
+                        body: n.body,
+                        created_at: n.created_at,
+                        system: n.system,
+                    })
+                    .collect(),
+            }
+        }));
+        if count < DISCUSSION_PAGE_SIZE {
+            break;
+        }
+    }
+    Ok(all)
+}
+
 /// Most recent note id on an MR, if any (used to seed the notification cursor).
 pub async fn fetch_mr_latest_note_id(host: &str, project_id: u64, iid: u32) -> Result<Option<u64>> {
     let path = format!(
