@@ -31,7 +31,7 @@ fn update_activity_glyph(activity: UpdateActivity) -> &'static str {
     }
 }
 
-use crate::app::App;
+use crate::app::{App, CopyChoice};
 use crate::gitlab::{CiStatus, MergeRequest, UpdateActivity};
 use crate::notifications::NotificationKind;
 use crate::selector::DisplayRow;
@@ -63,6 +63,8 @@ pub fn render(f: &mut Frame, app: &mut App) {
         render_author_selector(f, app);
     } else if app.show_help {
         render_help(f, app);
+    } else if app.copy_menu.is_some() {
+        render_copy_menu(f, app);
     }
 }
 
@@ -580,12 +582,54 @@ fn render_help(f: &mut Frame, app: &App) {
         Line::from("  0-9          jump to repo tab (0/1=first, 9=last)"),
         Line::from("  c            copy URL to clipboard"),
         Line::from("  C            copy MR reference (e.g. !2191)"),
+        Line::from("  Ctrl-Shift-C copy menu (URL, ID, link, branch)"),
         Line::from("  s            open repo selector"),
     ];
     if app.cmux_available {
         lines.push(Line::from("  Alt-Enter  open in cmux split"));
     }
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
+}
+
+fn render_copy_menu(f: &mut Frame, app: &App) {
+    let Some(cursor) = app.copy_menu else {
+        return;
+    };
+
+    let area = centered_fixed(f.area(), 52, 6);
+    f.render_widget(Clear, area);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Copy ")
+        .title_bottom(" ↑↓ select  Enter copy  Esc cancel ");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let items: Vec<ListItem> = CopyChoice::ALL
+        .iter()
+        .map(|choice| ListItem::new(Line::from(choice.label())))
+        .collect();
+    let list = List::new(items)
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+    let mut state = ratatui::widgets::ListState::default();
+    state.select(Some(cursor));
+    f.render_stateful_widget(list, inner, &mut state);
+}
+
+fn centered_fixed(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let vertical = Layout::vertical([Constraint::Length(height)]).flex(Flex::Center);
+    let horizontal = Layout::horizontal([Constraint::Length(width)]).flex(Flex::Center);
+    let [area] = vertical.areas(area);
+    let [area] = horizontal.areas(area);
+    area
 }
 
 fn centered_rect(area: Rect, percent_x: u16, percent_y: u16) -> Rect {
@@ -823,4 +867,67 @@ fn render_author_search_box(f: &mut Frame, sel: &crate::app::AuthorSelector, are
         ))
     };
     f.render_widget(Paragraph::new(line), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::CopiedKind;
+    use crate::config::RepoCfg;
+    use crate::gitlab::{CiStatus, MergeRequest};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    fn sample_mr() -> MergeRequest {
+        MergeRequest {
+            iid: "12".into(),
+            title: "Add copy menu".into(),
+            web_url: "https://git.example/group/repo/-/merge_requests/12".into(),
+            author_name: String::new(),
+            author_username: "alice".into(),
+            approved_by: Vec::new(),
+            approved: false,
+            draft: false,
+            has_conflicts: false,
+            notes_count: 0,
+            last_note_author: None,
+            last_note_at: None,
+            ci: CiStatus::None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            source_branch: "feature-x".into(),
+            last_update: None,
+        }
+    }
+
+    #[test]
+    fn copy_menu_and_confirmation_render() {
+        let mut app = App::new(
+            "git.example".into(),
+            vec![RepoCfg {
+                name: Some("repo".into()),
+                path: "group/repo".into(),
+            }],
+            String::new(),
+            false,
+            false,
+        );
+        app.repo_states[0].mrs = vec![sample_mr()];
+        app.repo_states[0].loaded = true;
+        app.table_state.select(Some(0));
+        app.open_copy_menu();
+        app.show_copied(CopiedKind::Link);
+
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+
+        assert!(view.contains("MR URL"), "{view}");
+        assert!(view.contains("MR ID"), "{view}");
+        assert!(view.contains("  Link "), "{view}");
+        assert!(!view.contains("pasteable"), "{view}");
+        assert!(view.contains("Branch name"), "{view}");
+        assert!(view.contains("Link copied!"), "{view}");
+    }
 }

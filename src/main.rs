@@ -10,12 +10,18 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+};
+use crossterm::execute;
 use futures::StreamExt;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 
-use app::{App, ApprovalEvent, CopiedKind, PollEvent, SelectorUpdate};
+use app::{
+    copy_payload, link_html, App, ApprovalEvent, CopiedKind, CopyChoice, PollEvent, SelectorUpdate,
+};
 use config::RepoCfg;
 use notifications::{Notification, NotificationStore};
 use selector::RepoFilter;
@@ -93,15 +99,25 @@ async fn main() -> Result<()> {
     };
 
     let mut terminal = ratatui::init();
-    let result = run(
-        &mut terminal,
-        &mut app,
-        &mut updates,
-        &mut selector_res_rx,
-        &mut user_res_rx,
-        &channels,
-    )
-    .await;
+    let _ = execute!(
+        std::io::stdout(),
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
+        ),
+    );
+    let result = {
+        let _pop_keyboard = PopKeyboardOnDrop;
+        run(
+            &mut terminal,
+            &mut app,
+            &mut updates,
+            &mut selector_res_rx,
+            &mut user_res_rx,
+            &channels,
+        )
+        .await
+    };
     ratatui::restore();
 
     if let Some(err) = app.fatal_error {
@@ -194,11 +210,45 @@ async fn run(
     Ok(())
 }
 
+struct PopKeyboardOnDrop;
+
+impl Drop for PopKeyboardOnDrop {
+    fn drop(&mut self) {
+        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+    }
+}
+
+/// Ctrl-Shift-C. Shift may already be folded into `C` when alternate keys are reported.
+fn is_advanced_copy(key: &KeyEvent) -> bool {
+    if !key.modifiers.contains(KeyModifiers::CONTROL) {
+        return false;
+    }
+    match key.code {
+        KeyCode::Char('C') => true,
+        KeyCode::Char('c') => key.modifiers.contains(KeyModifiers::SHIFT),
+        _ => false,
+    }
+}
+
 fn copy_to_clipboard(text: &str) -> bool {
     if let Ok(mut cb) = arboard::Clipboard::new() {
         cb.set_text(text.to_string()).is_ok()
     } else {
         false
+    }
+}
+
+fn copy_choice(choice: CopyChoice, mr: &crate::gitlab::MergeRequest) -> bool {
+    let Ok(mut cb) = arboard::Clipboard::new() else {
+        return false;
+    };
+    match choice {
+        CopyChoice::Link => {
+            let label = copy_payload(choice, mr);
+            cb.set_html(link_html(&mr.web_url, &label), Some(label))
+                .is_ok()
+        }
+        other => cb.set_text(copy_payload(other, mr)).is_ok(),
     }
 }
 
@@ -369,6 +419,16 @@ fn handle_key(app: &mut App, key: KeyEvent, channels: &Channels) {
         handle_help_key(app, key);
         return;
     }
+    if app.copy_menu.is_some() {
+        handle_copy_menu_key(app, key);
+        return;
+    }
+    if is_advanced_copy(&key) {
+        if !app.is_notifications_tab() {
+            app.open_copy_menu();
+        }
+        return;
+    }
 
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
@@ -502,6 +562,31 @@ fn handle_author_selector_key(app: &mut App, key: KeyEvent) {
                 }
             }
         }
+    }
+}
+
+fn handle_copy_menu_key(app: &mut App, key: KeyEvent) {
+    match (key.code, key.modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), _) => app.close_copy_menu(),
+        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => app.move_copy_menu(false),
+        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => app.move_copy_menu(true),
+        (KeyCode::Enter, _) => {
+            let Some(i) = app.copy_menu else {
+                return;
+            };
+            let Some(choice) = CopyChoice::ALL.get(i).copied() else {
+                return;
+            };
+            let Some(mr) = app.selected_mr() else {
+                return;
+            };
+            if copy_choice(choice, mr) {
+                app.show_copied(choice.copied_kind());
+                app.close_copy_menu();
+            }
+        }
+        _ => {}
     }
 }
 

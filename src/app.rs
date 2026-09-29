@@ -99,6 +99,10 @@ pub struct SelectorUpdate {
 pub enum CopiedKind {
     Url,
     Ref,
+    MrUrl,
+    MrId,
+    Link,
+    Branch,
 }
 
 impl CopiedKind {
@@ -106,8 +110,79 @@ impl CopiedKind {
         match self {
             CopiedKind::Url => "URL copied!",
             CopiedKind::Ref => "Ref copied!",
+            CopiedKind::MrUrl => "MR URL copied!",
+            CopiedKind::MrId => "MR ID copied!",
+            CopiedKind::Link => "Link copied!",
+            CopiedKind::Branch => "Branch copied!",
         }
     }
+}
+
+/// One row in the Ctrl-Shift-C copy menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyChoice {
+    Url,
+    Id,
+    Link,
+    Branch,
+}
+
+impl CopyChoice {
+    pub const ALL: [CopyChoice; 4] = [
+        CopyChoice::Url,
+        CopyChoice::Id,
+        CopyChoice::Link,
+        CopyChoice::Branch,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CopyChoice::Url => "MR URL",
+            CopyChoice::Id => "MR ID",
+            CopyChoice::Link => "Link",
+            CopyChoice::Branch => "Branch name",
+        }
+    }
+
+    pub fn copied_kind(self) -> CopiedKind {
+        match self {
+            CopyChoice::Url => CopiedKind::MrUrl,
+            CopyChoice::Id => CopiedKind::MrId,
+            CopyChoice::Link => CopiedKind::Link,
+            CopyChoice::Branch => CopiedKind::Branch,
+        }
+    }
+}
+
+/// Clipboard text for one copy-menu choice.
+///
+/// Link's visible text is the MR reference. The hyperlink itself is HTML; Slack
+/// pastes `<url|text>` as literal characters.
+pub fn copy_payload(choice: CopyChoice, mr: &MergeRequest) -> String {
+    match choice {
+        CopyChoice::Url => mr.web_url.clone(),
+        CopyChoice::Id | CopyChoice::Link => format!("!{}", mr.iid),
+        CopyChoice::Branch => mr.source_branch.clone(),
+    }
+}
+
+/// HTML anchor for the Link choice, pasted by Slack as a real hyperlink.
+pub fn link_html(url: &str, label: &str) -> String {
+    format!(
+        "<!--StartFragment--><a href=\"{}\">{}</a><!--EndFragment-->",
+        escape_html_attr(url),
+        escape_html_text(label),
+    )
+}
+
+fn escape_html_text(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn escape_html_attr(s: &str) -> String {
+    escape_html_text(s).replace('"', "&quot;")
 }
 
 #[derive(Debug, Clone)]
@@ -220,6 +295,8 @@ pub struct App {
     pub mr_search_active: bool,
     pub author_selector: Option<AuthorSelector>,
     pub show_help: bool,
+    /// Cursor in the Ctrl-Shift-C copy menu, when that modal is open.
+    pub copy_menu: Option<usize>,
     /// When set, the footer shows a copy confirmation until this instant.
     pub copied: Option<(CopiedKind, Instant)>,
     /// Whether `cmux` is on PATH (enables Opt-Enter to open in a split).
@@ -267,6 +344,7 @@ impl App {
             mr_search_active: false,
             author_selector: None,
             show_help: false,
+            copy_menu: None,
             copied: None,
             cmux_available,
             cmux_notify_enabled,
@@ -336,6 +414,28 @@ impl App {
 
     pub fn show_copied(&mut self, kind: CopiedKind) {
         self.copied = Some((kind, Instant::now() + Duration::from_secs(2)));
+    }
+
+    pub fn open_copy_menu(&mut self) {
+        if self.selected_mr().is_some() {
+            self.copy_menu = Some(0);
+        }
+    }
+
+    pub fn close_copy_menu(&mut self) {
+        self.copy_menu = None;
+    }
+
+    pub fn move_copy_menu(&mut self, down: bool) {
+        let Some(cursor) = self.copy_menu.as_mut() else {
+            return;
+        };
+        let last = CopyChoice::ALL.len() - 1;
+        if down {
+            *cursor = (*cursor + 1).min(last);
+        } else {
+            *cursor = cursor.saturating_sub(1);
+        }
     }
 
     pub fn active_copied(&self) -> Option<CopiedKind> {
@@ -748,18 +848,19 @@ impl App {
         }
     }
 
+    pub fn selected_mr(&self) -> Option<&MergeRequest> {
+        let idx = self.table_state.selected()?;
+        self.visible_mrs().into_iter().nth(idx)
+    }
+
     /// URL of the currently selected MR, if any.
     pub fn selected_url(&self) -> Option<String> {
-        let mrs = self.visible_mrs();
-        let idx = self.table_state.selected()?;
-        mrs.get(idx).map(|mr| mr.web_url.clone())
+        self.selected_mr().map(|mr| mr.web_url.clone())
     }
 
     /// Reference form of the currently selected MR (e.g. `!2191`), if any.
     pub fn selected_id(&self) -> Option<String> {
-        let mrs = self.visible_mrs();
-        let idx = self.table_state.selected()?;
-        mrs.get(idx).map(|mr| format!("!{}", mr.iid))
+        self.selected_mr().map(|mr| format!("!{}", mr.iid))
     }
 
     fn reset_selection(&mut self) {
@@ -837,6 +938,7 @@ mod tests {
             ci: crate::gitlab::CiStatus::None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            source_branch: String::new(),
             last_update: None,
         }
     }
@@ -865,6 +967,25 @@ mod tests {
         assert_eq!(events[0].approver, "bob");
         assert_eq!(events[0].repo, "group/repo");
         assert_eq!(events[0].mr_iid, "1");
+    }
+
+    #[test]
+    fn copy_payload_formats_each_choice() {
+        let mut mr = sample_mr("alice", "12", vec![]);
+        mr.web_url = "https://git.example/group/repo/-/merge_requests/12".into();
+        mr.source_branch = "feature-x".into();
+        assert_eq!(copy_payload(CopyChoice::Url, &mr), mr.web_url);
+        assert_eq!(copy_payload(CopyChoice::Id, &mr), "!12");
+        assert_eq!(copy_payload(CopyChoice::Link, &mr), "!12");
+        assert_eq!(
+            link_html(&mr.web_url, "!12"),
+            "<!--StartFragment--><a href=\"https://git.example/group/repo/-/merge_requests/12\">!12</a><!--EndFragment-->"
+        );
+        assert_eq!(
+            link_html("https://example.com/?a=1&b=2", "a<b"),
+            "<!--StartFragment--><a href=\"https://example.com/?a=1&amp;b=2\">a&lt;b</a><!--EndFragment-->"
+        );
+        assert_eq!(copy_payload(CopyChoice::Branch, &mr), "feature-x");
     }
 
     #[test]

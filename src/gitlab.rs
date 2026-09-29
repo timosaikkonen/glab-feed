@@ -39,6 +39,7 @@ pub struct MergeRequest {
     pub ci: CiStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub source_branch: String,
     /// Latest activity among pipeline run, human note, or commit push.
     pub last_update: Option<(UpdateActivity, String)>,
 }
@@ -85,7 +86,7 @@ query($fullPath: ID!) {
   project(fullPath: $fullPath) {
     mergeRequests(state: opened, sort: UPDATED_DESC, first: 50) {
       nodes {
-        iid title webUrl draft conflicts createdAt updatedAt
+        iid title webUrl draft conflicts createdAt updatedAt sourceBranch
         author { username name }
         approvedBy { nodes { username } }
         userNotesCount
@@ -140,6 +141,8 @@ struct MrNode {
     created_at: DateTime<Utc>,
     #[serde(rename = "updatedAt")]
     updated_at: DateTime<Utc>,
+    #[serde(rename = "sourceBranch")]
+    source_branch: String,
     author: Option<UserRef>,
     #[serde(rename = "approvedBy")]
     approved_by: UserConnection,
@@ -346,6 +349,7 @@ pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<Mer
                 ),
                 created_at: n.created_at,
                 updated_at: n.updated_at,
+                source_branch: n.source_branch,
                 last_update: latest_update(&n.head_pipeline, last_human, n.commits.nodes.first()),
             }
         })
