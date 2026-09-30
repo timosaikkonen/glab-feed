@@ -120,8 +120,24 @@ CHECKSUM="${TARBALL}.sha256"
 RELEASE_NOTES="$(mktemp)"
 trap 'rm -f "$RELEASE_NOTES"' EXIT
 
-cat >"$RELEASE_NOTES" <<EOF
-## glab-feed v${VERSION} (macOS ${ARCH})
+CHANGELOG_SECTION=""
+if [[ -f CHANGELOG.md ]]; then
+    CHANGELOG_SECTION="$(awk -v ver="## ${VERSION}" '
+        $0 == ver { found=1; print; next }
+        found && /^## / { exit }
+        found { print }
+    ' CHANGELOG.md)"
+fi
+
+{
+    if [[ -n "$CHANGELOG_SECTION" ]]; then
+        printf '%s\n' "$CHANGELOG_SECTION"
+        printf '\n'
+    else
+        printf '## glab-feed v%s (macOS %s)\n\n' "$VERSION" "$ARCH"
+    fi
+    cat <<EOF
+## Install (macOS ${ARCH})
 
 Extract and place \`${BINARY_NAME}\` on your \`PATH\`:
 
@@ -132,6 +148,7 @@ install -m 755 ${BINARY_NAME} /usr/local/bin/
 
 Requires [\`glab\`](https://gitlab.com/gitlab-org/cli) on \`PATH\` and a GitLab token.
 EOF
+} >"$RELEASE_NOTES"
 
 log "Releasing ${TAG} for darwin-${ARCH}"
 

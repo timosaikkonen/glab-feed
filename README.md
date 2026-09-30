@@ -21,6 +21,14 @@ A live-updating terminal UI for GitLab merge requests, built with [ratatui](http
 
 ## Install
 
+Install from crates.io:
+
+```bash
+cargo install glab-feed
+```
+
+Or build from a clone:
+
 ```bash
 cargo build --release
 ./target/release/glab-feed
