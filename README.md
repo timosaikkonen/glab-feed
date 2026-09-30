@@ -72,3 +72,7 @@ Notifications are stored in the same config directory as `config.toml` (`notific
 | `Tab` | Cycle filter: All / Mine / Member |
 | `Enter` | Save to `config.toml` and reload |
 | `Esc` / `q` | Cancel |
+
+## License
+
+MIT. See [LICENSE](LICENSE).
