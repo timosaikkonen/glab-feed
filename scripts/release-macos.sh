@@ -6,8 +6,9 @@
 #   ./scripts/release-macos.sh --version 0.2.0
 #   ./scripts/release-macos.sh --dry-run
 #   ./scripts/release-macos.sh --skip-tag   # upload assets only
+#   ./scripts/release-macos.sh --skip-screenshot
 #
-# Requires: macOS, git, cargo, gh (authenticated), tar, shasum
+# Requires: macOS, git, cargo, gh (authenticated), tar, shasum, vhs
 # Optional:
 #   GH_REPO     owner/name passed to gh -R (default: repo from the git remote)
 #   GIT_REMOTE  remote that receives the tag (default: origin)
@@ -21,6 +22,7 @@ BINARY_NAME="glab-feed"
 DRY_RUN=false
 ALLOW_DIRTY=false
 SKIP_TAG=false
+SKIP_SCREENSHOT=false
 VERSION=""
 
 usage() {
@@ -31,6 +33,7 @@ usage() {
     echo "  --dry-run         Print actions without tagging or uploading"
     echo "  --allow-dirty     Allow uncommitted changes"
     echo "  --skip-tag        Skip tag creation/push (upload assets only)"
+    echo "  --skip-screenshot Skip README screenshot capture"
     echo "  -h, --help        Show this help"
 }
 
@@ -52,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run) DRY_RUN=true; shift ;;
         --allow-dirty) ALLOW_DIRTY=true; shift ;;
         --skip-tag) SKIP_TAG=true; shift ;;
+        --skip-screenshot) SKIP_SCREENSHOT=true; shift ;;
         -h | --help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
     esac
@@ -73,6 +77,11 @@ for cmd in cargo git gh tar shasum; do
         exit 1
     fi
 done
+
+if ! $SKIP_SCREENSHOT && ! command -v vhs >/dev/null 2>&1; then
+    echo "error: required command not found: vhs (or use --skip-screenshot)" >&2
+    exit 1
+fi
 
 if ! gh auth status >/dev/null 2>&1; then
     echo "error: gh is not authenticated" >&2
@@ -118,7 +127,14 @@ ASSET_BASE="${BINARY_NAME}-${VERSION}-darwin-${ARCH}"
 TARBALL="dist/${ASSET_BASE}.tar.gz"
 CHECKSUM="${TARBALL}.sha256"
 RELEASE_NOTES="$(mktemp)"
-trap 'rm -f "$RELEASE_NOTES"' EXIT
+CAPTURE_DIR=""
+PKG_DIR=""
+cleanup() {
+    rm -f "$RELEASE_NOTES"
+    [[ -z "$CAPTURE_DIR" ]] || rm -rf "$CAPTURE_DIR"
+    [[ -z "$PKG_DIR" ]] || rm -rf "$PKG_DIR"
+}
+trap cleanup EXIT
 
 CHANGELOG_SECTION=""
 if [[ -f CHANGELOG.md ]]; then
@@ -168,12 +184,63 @@ if command -v strip >/dev/null 2>&1; then
     strip "$BINARY"
 fi
 
+# ----- Screenshot -----
+
+if ! $SKIP_SCREENSHOT; then
+    log "Capturing README screenshot"
+    CAPTURE_DIR="$(mktemp -d)"
+    cat >"$CAPTURE_DIR/screenshot.tape" <<EOF
+Output "$CAPTURE_DIR/demo.gif"
+Set Shell "bash"
+Set FontSize 13
+Set Width 1400
+Set Height 780
+Set Theme "TokyoNight"
+Set Padding 0
+Set Margin 0
+Set BorderRadius 0
+Set WindowBarSize 0
+Set FontFamily "FiraCode Nerd Font Mono"
+Set TypingSpeed 1ms
+Hide
+Type "unset NO_COLOR; export TERM=xterm-256color COLORTERM=truecolor; clear; ./$BINARY --demo"
+Enter
+Show
+Sleep 2s
+Screenshot "$CAPTURE_DIR/screenshot.png"
+Type "q"
+Sleep 300ms
+EOF
+    env -u NO_COLOR TERM=xterm-256color vhs "$CAPTURE_DIR/screenshot.tape"
+
+    if ! cmp -s "$CAPTURE_DIR/screenshot.png" screenshot.png; then
+        if $DRY_RUN; then
+            log "README screenshot would be updated"
+            printf '[dry-run] git add screenshot.png\n'
+            printf '[dry-run] git commit -m docs: update screenshot\n'
+            printf '[dry-run] git push %s <current-branch>\n' "$GIT_REMOTE"
+        else
+            cp "$CAPTURE_DIR/screenshot.png" screenshot.png
+            CURRENT_BRANCH="$(git symbolic-ref --quiet --short HEAD)" || {
+                echo "error: cannot commit screenshot from a detached HEAD" >&2
+                exit 1
+            }
+            log "Committing updated README screenshot"
+            git add screenshot.png
+            git commit -m "docs: update screenshot"
+            log "Pushing screenshot commit to $GIT_REMOTE/$CURRENT_BRANCH"
+            git push "$GIT_REMOTE" "$CURRENT_BRANCH"
+        fi
+    fi
+else
+    log "Skipping README screenshot (--skip-screenshot)"
+fi
+
 # ----- Package -----
 
 log "Packaging ${TARBALL}"
 mkdir -p dist
 PKG_DIR="$(mktemp -d)"
-trap 'rm -f "$RELEASE_NOTES"; rm -rf "$PKG_DIR"' EXIT
 cp "$BINARY" "$PKG_DIR/${BINARY_NAME}"
 tar czf "$TARBALL" -C "$PKG_DIR" "$BINARY_NAME"
 shasum -a 256 "$TARBALL" >"$CHECKSUM"
