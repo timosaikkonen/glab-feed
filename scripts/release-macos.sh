@@ -7,8 +7,9 @@
 #   ./scripts/release-macos.sh --dry-run
 #   ./scripts/release-macos.sh --skip-tag   # upload assets only
 #   ./scripts/release-macos.sh --skip-screenshot
+#   ./scripts/release-macos.sh --skip-changelog
 #
-# Requires: macOS, git, cargo, gh (authenticated), tar, shasum, vhs
+# Requires: macOS, git, cargo, gh (authenticated), tar, shasum, vhs, git-cliff
 # Optional:
 #   GH_REPO     owner/name passed to gh -R (default: repo from the git remote)
 #   GIT_REMOTE  remote that receives the tag (default: origin)
@@ -23,10 +24,11 @@ DRY_RUN=false
 ALLOW_DIRTY=false
 SKIP_TAG=false
 SKIP_SCREENSHOT=false
+SKIP_CHANGELOG=false
 VERSION=""
 
 usage() {
-    sed -n '2,8p' "$0"
+    sed -n '2,10p' "$0"
     echo ""
     echo "Options:"
     echo "  --version X.Y.Z   Release version (default: from Cargo.toml)"
@@ -34,6 +36,7 @@ usage() {
     echo "  --allow-dirty     Allow uncommitted changes"
     echo "  --skip-tag        Skip tag creation/push (upload assets only)"
     echo "  --skip-screenshot Skip README screenshot capture"
+    echo "  --skip-changelog  Skip changelog generation"
     echo "  -h, --help        Show this help"
 }
 
@@ -56,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         --allow-dirty) ALLOW_DIRTY=true; shift ;;
         --skip-tag) SKIP_TAG=true; shift ;;
         --skip-screenshot) SKIP_SCREENSHOT=true; shift ;;
+        --skip-changelog) SKIP_CHANGELOG=true; shift ;;
         -h | --help) usage; exit 0 ;;
         *) echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
     esac
@@ -80,6 +84,11 @@ done
 
 if ! $SKIP_SCREENSHOT && ! command -v vhs >/dev/null 2>&1; then
     echo "error: required command not found: vhs (or use --skip-screenshot)" >&2
+    exit 1
+fi
+
+if ! $SKIP_CHANGELOG && ! command -v git-cliff >/dev/null 2>&1; then
+    echo "error: required command not found: git-cliff (or use --skip-changelog)" >&2
     exit 1
 fi
 
@@ -128,43 +137,15 @@ TARBALL="dist/${ASSET_BASE}.tar.gz"
 CHECKSUM="${TARBALL}.sha256"
 RELEASE_NOTES="$(mktemp)"
 CAPTURE_DIR=""
+CHANGELOG_DIR=""
 PKG_DIR=""
 cleanup() {
     rm -f "$RELEASE_NOTES"
     [[ -z "$CAPTURE_DIR" ]] || rm -rf "$CAPTURE_DIR"
+    [[ -z "$CHANGELOG_DIR" ]] || rm -rf "$CHANGELOG_DIR"
     [[ -z "$PKG_DIR" ]] || rm -rf "$PKG_DIR"
 }
 trap cleanup EXIT
-
-CHANGELOG_SECTION=""
-if [[ -f CHANGELOG.md ]]; then
-    CHANGELOG_SECTION="$(awk -v ver="## ${VERSION}" '
-        $0 == ver { found=1; print; next }
-        found && /^## / { exit }
-        found { print }
-    ' CHANGELOG.md)"
-fi
-
-{
-    if [[ -n "$CHANGELOG_SECTION" ]]; then
-        printf '%s\n' "$CHANGELOG_SECTION"
-        printf '\n'
-    else
-        printf '## glab-feed v%s (macOS %s)\n\n' "$VERSION" "$ARCH"
-    fi
-    cat <<EOF
-## Install (macOS ${ARCH})
-
-Extract and place \`${BINARY_NAME}\` on your \`PATH\`:
-
-\`\`\`bash
-tar xzf ${ASSET_BASE}.tar.gz
-install -m 755 ${BINARY_NAME} /usr/local/bin/
-\`\`\`
-
-Requires [\`glab\`](https://gitlab.com/gitlab-org/cli) on \`PATH\` and a GitLab token.
-EOF
-} >"$RELEASE_NOTES"
 
 log "Releasing ${TAG} for darwin-${ARCH}"
 
@@ -217,7 +198,7 @@ EOF
         if $DRY_RUN; then
             log "README screenshot would be updated"
             printf '[dry-run] git add screenshot.png\n'
-            printf '[dry-run] git commit -m docs: update screenshot\n'
+            printf '[dry-run] git commit -m "docs(release): update screenshot"\n'
             printf '[dry-run] git push %s <current-branch>\n' "$GIT_REMOTE"
         else
             cp "$CAPTURE_DIR/screenshot.png" screenshot.png
@@ -227,7 +208,7 @@ EOF
             }
             log "Committing updated README screenshot"
             git add screenshot.png
-            git commit -m "docs: update screenshot"
+            git commit -m "docs(release): update screenshot"
             log "Pushing screenshot commit to $GIT_REMOTE/$CURRENT_BRANCH"
             git push "$GIT_REMOTE" "$CURRENT_BRANCH"
         fi
@@ -235,6 +216,74 @@ EOF
 else
     log "Skipping README screenshot (--skip-screenshot)"
 fi
+
+# ----- Changelog -----
+
+if ! $SKIP_CHANGELOG; then
+    if [[ ! -f CHANGELOG.md ]]; then
+        echo "error: CHANGELOG.md not found" >&2
+        exit 1
+    fi
+    if grep -qx "## ${VERSION}" CHANGELOG.md; then
+        log "Changelog already contains ${VERSION}"
+    else
+        log "Updating changelog"
+        CHANGELOG_DIR="$(mktemp -d)"
+        cp CHANGELOG.md "$CHANGELOG_DIR/CHANGELOG.md"
+        git-cliff --unreleased --tag "$VERSION" --prepend "$CHANGELOG_DIR/CHANGELOG.md"
+        if ! cmp -s "$CHANGELOG_DIR/CHANGELOG.md" CHANGELOG.md; then
+            if $DRY_RUN; then
+                log "Changelog would be updated"
+                printf '[dry-run] git add CHANGELOG.md\n'
+                printf '[dry-run] git commit -m "docs(release): update changelog"\n'
+                printf '[dry-run] git push %s <current-branch>\n' "$GIT_REMOTE"
+            else
+                cp "$CHANGELOG_DIR/CHANGELOG.md" CHANGELOG.md
+                CURRENT_BRANCH="$(git symbolic-ref --quiet --short HEAD)" || {
+                    echo "error: cannot commit changelog from a detached HEAD" >&2
+                    exit 1
+                }
+                log "Committing updated changelog"
+                git add CHANGELOG.md
+                git commit -m "docs(release): update changelog"
+                log "Pushing changelog commit to $GIT_REMOTE/$CURRENT_BRANCH"
+                git push "$GIT_REMOTE" "$CURRENT_BRANCH"
+            fi
+        fi
+    fi
+else
+    log "Skipping changelog (--skip-changelog)"
+fi
+
+CHANGELOG_SECTION=""
+if [[ -f CHANGELOG.md ]]; then
+    CHANGELOG_SECTION="$(awk -v ver="## ${VERSION}" '
+        $0 == ver { found=1; print; next }
+        found && /^## / { exit }
+        found { print }
+    ' CHANGELOG.md)"
+fi
+
+{
+    if [[ -n "$CHANGELOG_SECTION" ]]; then
+        printf '%s\n' "$CHANGELOG_SECTION"
+        printf '\n'
+    else
+        printf '## glab-feed v%s (macOS %s)\n\n' "$VERSION" "$ARCH"
+    fi
+    cat <<EOF
+## Install (macOS ${ARCH})
+
+Extract and place \`${BINARY_NAME}\` on your \`PATH\`:
+
+\`\`\`bash
+tar xzf ${ASSET_BASE}.tar.gz
+install -m 755 ${BINARY_NAME} /usr/local/bin/
+\`\`\`
+
+Requires [\`glab\`](https://gitlab.com/gitlab-org/cli) on \`PATH\` and a GitLab token.
+EOF
+} >"$RELEASE_NOTES"
 
 # ----- Package -----
 

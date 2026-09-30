@@ -1,0 +1,44 @@
+# git-cliff configuration
+# https://git-cliff.org/docs/configuration
+
+[changelog]
+header = """
+# Changelog
+
+"""
+body = """
+{% if version %}\
+    ## {{ version | trim_start_matches(pat="v") }}
+{% else %}\
+    ## [unreleased]
+{% endif %}\
+{% for entry in commits | commit_groups(groups=commit_parsers_groups) %}
+    ### {{ entry.group | striptags | trim | upper_first }}
+    {% for commit in entry.commits %}
+        - {{ commit.message | upper_first }}\
+    {% endfor %}
+{% endfor %}
+%%CLIFF_SECTION_END%%
+"""
+trim = true
+render_always = false
+# Keeps a blank line between a prepended release and the previous section.
+postprocessors = [
+    { pattern = "%%CLIFF_SECTION_END%%", replace = "" },
+]
+
+[git]
+conventional_commits = true
+filter_unconventional = true
+commit_parsers = [
+    { message = "^\\w+\\(release\\)", skip = true },
+    { message = "^feat", group = "Added" },
+    { message = "^fix", group = "Fixed" },
+    { message = "^docs", group = "Documentation" },
+    { message = "^chore", skip = true },
+    { message = "^style", skip = true },
+    { message = "^build", skip = true },
+    { message = "^ci", skip = true },
+]
+tag_pattern = "v[0-9]*"
+sort_commits = "oldest"
