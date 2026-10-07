@@ -679,7 +679,7 @@ fn render_help(f: &mut Frame, app: &App) {
         Line::from("  0-9          jump to repo tab (0/1=first, 9=last)"),
         Line::from("  c            copy URL to clipboard"),
         Line::from("  C            copy MR reference (e.g. !2191)"),
-        Line::from("  Ctrl-Shift-C copy menu (URL, ID, link, branch)"),
+        Line::from("  Ctrl-Shift-C copy menu (u URL, i ID, l link, b branch)"),
         Line::from("  s            open repo selector"),
     ];
     if app.cmux_available {
@@ -705,7 +705,7 @@ fn render_copy_menu(f: &mut Frame, app: &App) {
 
     let items: Vec<ListItem> = CopyChoice::ALL
         .iter()
-        .map(|choice| ListItem::new(Line::from(choice.label())))
+        .map(|choice| ListItem::new(Line::from(format!("[{}] {}", choice.key(), choice.label()))))
         .collect();
     let list = List::new(items)
         .highlight_style(
@@ -1020,11 +1020,11 @@ mod tests {
         terminal.draw(|f| render(f, &mut app)).unwrap();
         let view = format!("{}", terminal.backend());
 
-        assert!(view.contains("MR URL"), "{view}");
-        assert!(view.contains("MR ID"), "{view}");
-        assert!(view.contains("  Link "), "{view}");
+        assert!(view.contains("[u] MR URL"), "{view}");
+        assert!(view.contains("[i] MR ID"), "{view}");
+        assert!(view.contains("[l] Link"), "{view}");
         assert!(!view.contains("pasteable"), "{view}");
-        assert!(view.contains("Branch name"), "{view}");
+        assert!(view.contains("[b] Branch name"), "{view}");
         assert!(view.contains("Link copied!"), "{view}");
     }
 

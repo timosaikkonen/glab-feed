@@ -615,6 +615,16 @@ fn handle_author_selector_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn copy_menu_selection(app: &mut App, choice: CopyChoice) {
+    let Some(mr) = app.selected_mr() else {
+        return;
+    };
+    if copy_choice(choice, mr) {
+        app.show_copied(choice.copied_kind());
+        app.close_copy_menu();
+    }
+}
+
 fn handle_copy_menu_key(app: &mut App, key: KeyEvent) {
     match (key.code, key.modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => app.should_quit = true,
@@ -628,12 +638,11 @@ fn handle_copy_menu_key(app: &mut App, key: KeyEvent) {
             let Some(choice) = CopyChoice::ALL.get(i).copied() else {
                 return;
             };
-            let Some(mr) = app.selected_mr() else {
-                return;
-            };
-            if copy_choice(choice, mr) {
-                app.show_copied(choice.copied_kind());
-                app.close_copy_menu();
+            copy_menu_selection(app, choice);
+        }
+        (KeyCode::Char(c), mods) if mods.is_empty() || mods == KeyModifiers::SHIFT => {
+            if let Some(choice) = CopyChoice::from_key(c) {
+                copy_menu_selection(app, choice);
             }
         }
         _ => {}

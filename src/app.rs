@@ -152,6 +152,21 @@ impl CopyChoice {
             CopyChoice::Branch => CopiedKind::Branch,
         }
     }
+
+    /// Letter that copies this choice while the copy menu is open.
+    pub fn key(self) -> char {
+        match self {
+            CopyChoice::Url => 'u',
+            CopyChoice::Id => 'i',
+            CopyChoice::Link => 'l',
+            CopyChoice::Branch => 'b',
+        }
+    }
+
+    pub fn from_key(c: char) -> Option<Self> {
+        let c = c.to_ascii_lowercase();
+        Self::ALL.into_iter().find(|choice| choice.key() == c)
+    }
 }
 
 /// Clipboard text for one copy-menu choice.
@@ -990,6 +1005,15 @@ mod tests {
             "<!--StartFragment--><a href=\"https://example.com/?a=1&amp;b=2\">a&lt;b</a><!--EndFragment-->"
         );
         assert_eq!(copy_payload(CopyChoice::Branch, &mr), "feature-x");
+    }
+
+    #[test]
+    fn copy_choice_from_key_is_case_insensitive() {
+        assert_eq!(CopyChoice::from_key('u'), Some(CopyChoice::Url));
+        assert_eq!(CopyChoice::from_key('I'), Some(CopyChoice::Id));
+        assert_eq!(CopyChoice::from_key('l'), Some(CopyChoice::Link));
+        assert_eq!(CopyChoice::from_key('B'), Some(CopyChoice::Branch));
+        assert_eq!(CopyChoice::from_key('q'), None);
     }
 
     #[test]

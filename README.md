@@ -64,7 +64,7 @@ path = "group/my-repo"
 | `Opt-Enter` | Open selected MR in cmux split (when `cmux` is installed) |
 | `c` | Copy MR/notification URL to clipboard |
 | `C` | Copy MR reference (e.g. `!2191`) to clipboard |
-| `Ctrl-Shift-C` | Copy menu: MR URL, MR ID, link (`!ref`), or branch |
+| `Ctrl-Shift-C` | Copy menu: MR URL, MR ID, link (`!ref`), or branch. In the menu, `u` / `i` / `l` / `b` copy that choice |
 | `s` | Open the repo selector |
 | `r` | Refresh now |
 | `q` / `Esc` | Quit |
