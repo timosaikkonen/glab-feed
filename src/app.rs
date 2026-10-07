@@ -272,6 +272,9 @@ pub struct App {
     pub repos: Vec<RepoCfg>,
     pub repo_states: Vec<RepoState>,
     pub selected_tab: usize,
+    /// First tab index drawn in the tab bar. Updated while rendering so the
+    /// selected tab stays fully visible when the titles overflow.
+    pub tab_scroll: usize,
     pub table_state: TableState,
     /// When non-empty, only MRs from these author usernames are shown.
     pub author_filter: HashSet<String>,
@@ -327,6 +330,7 @@ impl App {
             repos,
             repo_states,
             selected_tab: 0,
+            tab_scroll: 0,
             table_state: TableState::default(),
             author_filter: HashSet::new(),
             current_user,

@@ -107,7 +107,75 @@ fn render_url_prompt(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(Text::from(lines)), inner);
 }
 
-fn render_tabs(f: &mut Frame, app: &App, area: Rect) {
+const TAB_PAD: &str = " ";
+const TAB_DIVIDER: &str = "|";
+
+/// Columns occupied by `widths[start..end]`, including the divider between tabs.
+fn span_width(widths: &[usize], start: usize, end: usize, divider: usize) -> usize {
+    if start >= end {
+        return 0;
+    }
+    widths[start..end].iter().sum::<usize>() + divider * (end - start - 1)
+}
+
+/// First index after the tabs that fit in `available` columns, starting at `start`.
+fn fitting_end(widths: &[usize], start: usize, available: usize, divider: usize) -> usize {
+    let mut end = start;
+    let mut used = 0usize;
+    while end < widths.len() {
+        let add = widths[end] + if end > start { divider } else { 0 };
+        if used + add > available {
+            break;
+        }
+        used += add;
+        end += 1;
+    }
+    end
+}
+
+/// Visible tab range (`end` exclusive) that keeps `selected` fully on screen.
+///
+/// `widths` include each tab's padding and exclude dividers. `scroll` is the
+/// previous first-visible index. The range stays put while the selection remains
+/// inside it, and slides left to fill the bar when the tail of the list is shorter
+/// than `available`.
+fn visible_tab_range(
+    widths: &[usize],
+    selected: usize,
+    available: usize,
+    scroll: usize,
+    divider: usize,
+) -> (usize, usize) {
+    if widths.is_empty() {
+        return (0, 0);
+    }
+    let selected = selected.min(widths.len() - 1);
+    let mut start = scroll.min(selected);
+
+    while start < selected && span_width(widths, start, selected + 1, divider) > available {
+        start += 1;
+    }
+
+    while start > 0 {
+        let tail = span_width(widths, start, widths.len(), divider);
+        if tail >= available {
+            break;
+        }
+        let with_prev = widths[start - 1] + divider + tail;
+        if with_prev > available {
+            break;
+        }
+        start -= 1;
+    }
+
+    let mut end = fitting_end(widths, start, available, divider);
+    if end <= selected {
+        end = selected + 1;
+    }
+    (start, end.min(widths.len()))
+}
+
+fn render_tabs(f: &mut Frame, app: &mut App, area: Rect) {
     let mut titles: Vec<Line> = app
         .repos
         .iter()
@@ -131,16 +199,45 @@ fn render_tabs(f: &mut Frame, app: &App, area: Rect) {
     }
     titles.push(Line::from(notif_label));
 
-    let tabs = Tabs::new(titles)
-        .select(app.selected_tab)
-        .block(Block::default().borders(Borders::ALL).title(" Tabs "))
+    let pad = Line::from(TAB_PAD).width();
+    let divider = Line::from(TAB_DIVIDER).width();
+    let widths: Vec<usize> = titles
+        .iter()
+        .map(|title| pad + title.width() + pad)
+        .collect();
+    let available = area.width.saturating_sub(2) as usize;
+    let (start, end) = visible_tab_range(
+        &widths,
+        app.selected_tab,
+        available,
+        app.tab_scroll,
+        divider,
+    );
+    app.tab_scroll = start;
+
+    let hint = match (start > 0, end < titles.len()) {
+        (true, true) => " < > ",
+        (true, false) => " < ",
+        (false, true) => " > ",
+        (false, false) => "",
+    };
+    let mut block = Block::default().borders(Borders::ALL).title(" Tabs ");
+    if !hint.is_empty() {
+        block = block.title_top(Line::from(hint).right_aligned());
+    }
+
+    let selected = app.selected_tab.saturating_sub(start);
+    let tabs = Tabs::new(titles.into_iter().skip(start).take(end - start))
+        .select(selected)
+        .block(block)
         .highlight_style(
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         )
-        .divider("|");
+        .padding(TAB_PAD, TAB_PAD)
+        .divider(TAB_DIVIDER);
     f.render_widget(tabs, area);
 }
 
@@ -929,5 +1026,58 @@ mod tests {
         assert!(!view.contains("pasteable"), "{view}");
         assert!(view.contains("Branch name"), "{view}");
         assert!(view.contains("Link copied!"), "{view}");
+    }
+
+    #[test]
+    fn visible_tab_range_keeps_selected_tab_in_view() {
+        let divider = 1;
+        let widths = vec![10; 6];
+
+        // Everything fits, even if the previous viewport was scrolled.
+        assert_eq!(visible_tab_range(&widths, 2, 100, 5, divider), (0, 6));
+
+        // Three tabs of width 10 plus two dividers fill 32 columns.
+        // Selecting a tab past that edge advances the viewport until it fits.
+        assert_eq!(visible_tab_range(&widths, 4, 32, 0, divider), (2, 5));
+
+        // Moving left onto a tab that is already visible does not reshuffle.
+        assert_eq!(visible_tab_range(&widths, 3, 32, 2, divider), (2, 5));
+
+        // Moving left of the viewport follows the selection.
+        assert_eq!(visible_tab_range(&widths, 1, 32, 3, divider), (1, 4));
+
+        // Near the end, spare columns pull earlier tabs into the row.
+        // Four tabs need 43 columns; 50 fits them and not a fifth (54).
+        assert_eq!(visible_tab_range(&widths, 5, 50, 4, divider), (2, 6));
+    }
+
+    #[test]
+    fn tab_bar_scrolls_selected_tab_into_view() {
+        let names = [
+            "repo-aaa", "repo-bbb", "repo-ccc", "repo-ddd", "repo-eee", "repo-fff", "repo-ggg",
+            "repo-hhh",
+        ];
+        let repos = names
+            .into_iter()
+            .map(|name| RepoCfg {
+                name: Some(name.into()),
+                path: format!("group/{name}"),
+            })
+            .collect();
+        let mut app = App::new("git.example".into(), repos, String::new(), false, false);
+        app.select_repo_tab(names.len() - 1);
+
+        let backend = TestBackend::new(40, 16);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+        assert!(view.contains("repo-hhh"), "{view}");
+        assert!(!view.contains("repo-aaa"), "{view}");
+        assert!(view.contains('<'), "{view}");
+
+        app.select_repo_tab(0);
+        terminal.draw(|f| render(f, &mut app)).unwrap();
+        let view = format!("{}", terminal.backend());
+        assert!(view.contains("repo-aaa"), "{view}");
     }
 }
