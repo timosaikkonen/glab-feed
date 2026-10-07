@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1
+
+### Added
+
+- Scroll the tab bar to keep the selected tab visible
+
+### Documentation
+
+- Recapture the README screenshot in color
+
 ## 0.2.0
 
 First public release.
