@@ -171,12 +171,13 @@ impl CopyChoice {
 
 /// Clipboard text for one copy-menu choice.
 ///
-/// Link's visible text is the MR reference. The hyperlink itself is HTML; Slack
-/// pastes `<url|text>` as literal characters.
-pub fn copy_payload(choice: CopyChoice, mr: &MergeRequest) -> String {
+/// Link's visible text is `{repo}!{iid}` (for example `ext-service!123`). The
+/// hyperlink itself is HTML; Slack pastes `<url|text>` as literal characters.
+pub fn copy_payload(choice: CopyChoice, mr: &MergeRequest, repo: &str) -> String {
     match choice {
         CopyChoice::Url => mr.web_url.clone(),
-        CopyChoice::Id | CopyChoice::Link => format!("!{}", mr.iid),
+        CopyChoice::Id => format!("!{}", mr.iid),
+        CopyChoice::Link => format!("{repo}!{}", mr.iid),
         CopyChoice::Branch => mr.source_branch.clone(),
     }
 }
@@ -993,18 +994,27 @@ mod tests {
         let mut mr = sample_mr("alice", "12", vec![]);
         mr.web_url = "https://git.example/group/repo/-/merge_requests/12".into();
         mr.source_branch = "feature-x".into();
-        assert_eq!(copy_payload(CopyChoice::Url, &mr), mr.web_url);
-        assert_eq!(copy_payload(CopyChoice::Id, &mr), "!12");
-        assert_eq!(copy_payload(CopyChoice::Link, &mr), "!12");
         assert_eq!(
-            link_html(&mr.web_url, "!12"),
-            "<!--StartFragment--><a href=\"https://git.example/group/repo/-/merge_requests/12\">!12</a><!--EndFragment-->"
+            copy_payload(CopyChoice::Url, &mr, "ext-service"),
+            mr.web_url
+        );
+        assert_eq!(copy_payload(CopyChoice::Id, &mr, "ext-service"), "!12");
+        assert_eq!(
+            copy_payload(CopyChoice::Link, &mr, "ext-service"),
+            "ext-service!12"
+        );
+        assert_eq!(
+            link_html(&mr.web_url, "ext-service!12"),
+            "<!--StartFragment--><a href=\"https://git.example/group/repo/-/merge_requests/12\">ext-service!12</a><!--EndFragment-->"
         );
         assert_eq!(
             link_html("https://example.com/?a=1&b=2", "a<b"),
             "<!--StartFragment--><a href=\"https://example.com/?a=1&amp;b=2\">a&lt;b</a><!--EndFragment-->"
         );
-        assert_eq!(copy_payload(CopyChoice::Branch, &mr), "feature-x");
+        assert_eq!(
+            copy_payload(CopyChoice::Branch, &mr, "ext-service"),
+            "feature-x"
+        );
     }
 
     #[test]

@@ -288,17 +288,17 @@ fn copy_to_clipboard(text: &str) -> bool {
     }
 }
 
-fn copy_choice(choice: CopyChoice, mr: &crate::gitlab::MergeRequest) -> bool {
+fn copy_choice(choice: CopyChoice, mr: &crate::gitlab::MergeRequest, repo: &str) -> bool {
     let Ok(mut cb) = arboard::Clipboard::new() else {
         return false;
     };
     match choice {
         CopyChoice::Link => {
-            let label = copy_payload(choice, mr);
+            let label = copy_payload(choice, mr, repo);
             cb.set_html(link_html(&mr.web_url, &label), Some(label))
                 .is_ok()
         }
-        other => cb.set_text(copy_payload(other, mr)).is_ok(),
+        other => cb.set_text(copy_payload(other, mr, repo)).is_ok(),
     }
 }
 
@@ -616,10 +616,15 @@ fn handle_author_selector_key(app: &mut App, key: KeyEvent) {
 }
 
 fn copy_menu_selection(app: &mut App, choice: CopyChoice) {
+    let repo = app
+        .repos
+        .get(app.selected_tab)
+        .map(|repo| repo.project_name().to_string())
+        .unwrap_or_default();
     let Some(mr) = app.selected_mr() else {
         return;
     };
-    if copy_choice(choice, mr) {
+    if copy_choice(choice, mr, &repo) {
         app.show_copied(choice.copied_kind());
         app.close_copy_menu();
     }

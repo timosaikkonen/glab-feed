@@ -21,6 +21,14 @@ impl RepoCfg {
     pub fn label(&self) -> &str {
         self.name.as_deref().unwrap_or(&self.path)
     }
+
+    /// GitLab project name: the last segment of `path`.
+    pub fn project_name(&self) -> &str {
+        self.path
+            .rsplit('/')
+            .find(|segment| !segment.is_empty())
+            .unwrap_or(&self.path)
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -117,6 +125,20 @@ mod tests {
             );
         }
         assert_eq!(parse_host(""), None);
+    }
+
+    #[test]
+    fn project_name_is_the_last_path_segment() {
+        let repo = super::RepoCfg {
+            name: Some("tab".into()),
+            path: "group/ext-service".into(),
+        };
+        assert_eq!(repo.project_name(), "ext-service");
+        let bare = super::RepoCfg {
+            name: None,
+            path: "ext-service".into(),
+        };
+        assert_eq!(bare.project_name(), "ext-service");
     }
 }
 
