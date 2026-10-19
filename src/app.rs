@@ -283,6 +283,17 @@ impl AuthorSelector {
     }
 }
 
+/// Which MR the table follows. `table_state` is the derived row cursor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Selection {
+    /// No MR chosen yet. Highlight the first visible MR once the list is non-empty.
+    Unset,
+    /// Follow this MR across list updates.
+    Iid(String),
+    /// The followed MR left the list. Stay empty until the user moves.
+    Cleared,
+}
+
 pub struct App {
     pub host: String,
     pub repos: Vec<RepoCfg>,
@@ -292,6 +303,8 @@ pub struct App {
     /// selected tab stays fully visible when the titles overflow.
     pub tab_scroll: usize,
     pub table_state: TableState,
+    /// MR the table follows on the current repo tab. `table_state` is derived from this.
+    selection: Selection,
     /// When non-empty, only MRs from these author usernames are shown.
     pub author_filter: HashSet<String>,
     pub current_user: String,
@@ -348,6 +361,7 @@ impl App {
             selected_tab: 0,
             tab_scroll: 0,
             table_state: TableState::default(),
+            selection: Selection::Unset,
             author_filter: HashSet::new(),
             current_user,
             next_poll: Instant::now() + POLL_INTERVAL,
@@ -663,7 +677,7 @@ impl App {
         } else {
             None
         };
-        self.clamp_selection();
+        self.sync_selection();
         approvals
     }
 
@@ -782,7 +796,7 @@ impl App {
             Some(i) => i,
             None => 0,
         };
-        self.table_state.select(Some(i));
+        self.select_index(i);
     }
 
     pub fn select_prev(&mut self) {
@@ -795,6 +809,14 @@ impl App {
             Some(0) | None => 0,
             Some(i) => i - 1,
         };
+        self.select_index(i);
+    }
+
+    fn select_index(&mut self, i: usize) {
+        let Some(iid) = self.visible_mrs().get(i).map(|mr| mr.iid.clone()) else {
+            return;
+        };
+        self.selection = Selection::Iid(iid);
         self.table_state.select(Some(i));
     }
 
@@ -884,20 +906,31 @@ impl App {
     }
 
     fn reset_selection(&mut self) {
-        if self.visible_mrs().is_empty() {
-            self.table_state.select(None);
-        } else {
-            self.table_state.select(Some(0));
-        }
+        self.selection = Selection::Unset;
+        self.sync_selection();
     }
 
-    fn clamp_selection(&mut self) {
-        let len = self.visible_mrs().len();
-        match self.table_state.selected() {
-            _ if len == 0 => self.table_state.select(None),
-            Some(i) if i >= len => self.table_state.select(Some(len - 1)),
-            None => self.table_state.select(Some(0)),
-            _ => {}
+    /// Point `table_state` at the followed MR, or clear it when that MR is gone.
+    fn sync_selection(&mut self) {
+        let iids: Vec<String> = self.visible_mrs().iter().map(|mr| mr.iid.clone()).collect();
+        match self.selection.clone() {
+            Selection::Iid(iid) => {
+                if let Some(i) = iids.iter().position(|id| id == &iid) {
+                    self.table_state.select(Some(i));
+                } else {
+                    self.selection = Selection::Cleared;
+                    self.table_state.select(None);
+                }
+            }
+            Selection::Cleared => self.table_state.select(None),
+            Selection::Unset => {
+                if let Some(iid) = iids.first().cloned() {
+                    self.selection = Selection::Iid(iid);
+                    self.table_state.select(Some(0));
+                } else {
+                    self.table_state.select(None);
+                }
+            }
         }
     }
 }
@@ -938,6 +971,7 @@ fn detect_approval_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::RepoCfg;
     use chrono::Utc;
 
     fn sample_mr(author: &str, iid: &str, approved_by: Vec<&str>) -> MergeRequest {
@@ -1024,6 +1058,70 @@ mod tests {
         assert_eq!(CopyChoice::from_key('l'), Some(CopyChoice::Link));
         assert_eq!(CopyChoice::from_key('B'), Some(CopyChoice::Branch));
         assert_eq!(CopyChoice::from_key('q'), None);
+    }
+
+    fn app_for_repo() -> App {
+        App::new(
+            "git.example".into(),
+            vec![RepoCfg {
+                name: None,
+                path: "group/repo".into(),
+            }],
+            String::new(),
+            false,
+            false,
+        )
+    }
+
+    fn finish_poll(app: &mut App, iids: &[&str]) {
+        let mrs = iids
+            .iter()
+            .map(|iid| sample_mr("alice", iid, vec![]))
+            .collect();
+        app.handle_poll_finished(PollUpdate {
+            results: vec![("group/repo".into(), Ok(mrs))],
+        });
+    }
+
+    fn selected_iid(app: &App) -> Option<&str> {
+        app.selected_mr().map(|mr| mr.iid.as_str())
+    }
+
+    #[test]
+    fn selection_follows_mr_when_an_earlier_row_closes() {
+        let mut app = app_for_repo();
+        finish_poll(&mut app, &["1", "2", "3"]);
+        app.select_next();
+        finish_poll(&mut app, &["2", "3"]);
+        assert_eq!(selected_iid(&app), Some("2"));
+    }
+
+    #[test]
+    fn selection_stays_clear_after_the_selected_mr_closes() {
+        let mut app = app_for_repo();
+        finish_poll(&mut app, &["1", "2"]);
+        app.select_next();
+        finish_poll(&mut app, &["1"]);
+        assert_eq!(selected_iid(&app), None);
+        finish_poll(&mut app, &["1", "3"]);
+        assert_eq!(selected_iid(&app), None);
+    }
+
+    #[test]
+    fn arrows_from_cleared_selection_select_the_first_mr() {
+        let mut app = app_for_repo();
+        finish_poll(&mut app, &["1", "2"]);
+        app.select_next();
+        finish_poll(&mut app, &["1", "3"]);
+        app.select_next();
+        assert_eq!(selected_iid(&app), Some("1"));
+
+        let mut app = app_for_repo();
+        finish_poll(&mut app, &["1", "2"]);
+        app.select_next();
+        finish_poll(&mut app, &["1", "3"]);
+        app.select_prev();
+        assert_eq!(selected_iid(&app), Some("1"));
     }
 
     #[test]
