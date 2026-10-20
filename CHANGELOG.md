@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.2
+
+### Added
+
+- Add a letter hotkey for each copy-menu choice
+- Prefix copied link text with the repo name
+
+### Fixed
+
+- Keep the selected merge request when the list changes
+
 ## 0.2.1
 
 ### Added
