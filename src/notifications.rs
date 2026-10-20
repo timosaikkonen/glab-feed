@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::{self, RepoCfg};
+use crate::config;
 use crate::gitlab::{self, Discussion, MrCandidate, RestTodo};
 
 pub const MAX_ITEMS: usize = 300;
@@ -146,20 +146,6 @@ fn mr_iid_from_url(url: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-fn repo_from_todo_url(url: &str, configured: &[RepoCfg]) -> Option<String> {
-    // https://host/group/repo/-/merge_requests/42
-    let after_host = url.split("://").nth(1)?;
-    let path_part = after_host.split('/').skip(1).collect::<Vec<_>>().join("/");
-    let mr_marker = "/-/merge_requests/";
-    let repo_end = path_part.find(mr_marker)?;
-    let repo = path_part[..repo_end].to_string();
-    if configured.iter().any(|r| r.path == repo) {
-        Some(repo)
-    } else {
-        None
-    }
-}
-
 async fn collect_new_notes(
     host: &str,
     candidate: &MrCandidate,
@@ -253,9 +239,7 @@ fn collect_new_todos(
     todos: &[RestTodo],
     last_todo_id: u64,
     current_user: &str,
-    configured: &[RepoCfg],
 ) -> Vec<Notification> {
-    let configured_paths: HashSet<&str> = configured.iter().map(|r| r.path.as_str()).collect();
     let mut out = Vec::new();
 
     for t in todos {
@@ -269,19 +253,7 @@ fn collect_new_todos(
             continue;
         };
         let url = t.target_url.clone().unwrap_or_default();
-        let repo = repo_from_todo_url(&url, configured)
-            .or_else(|| {
-                // Fall back: match any configured repo prefix in the URL.
-                configured_paths
-                    .iter()
-                    .find(|p| url.contains(*p))
-                    .map(|p| (*p).to_string())
-            })
-            .unwrap_or_default();
-        if !repo.is_empty() && !configured_paths.contains(repo.as_str()) {
-            continue;
-        }
-        // Skip todos for repos outside our configured set when we could identify the repo.
+        let repo = gitlab::repo_path_from_url(&url).unwrap_or_default();
         if !url.is_empty() && repo.is_empty() {
             continue;
         }
@@ -311,45 +283,19 @@ fn collect_new_todos(
 /// Returns newly appended items (empty during the initial seeding poll).
 pub async fn poll(
     host: &str,
-    repos: &[RepoCfg],
     current_user: &str,
     store: &mut NotificationStore,
 ) -> Result<Vec<Notification>> {
-    if current_user.is_empty() || repos.is_empty() {
+    if current_user.is_empty() {
         return Ok(Vec::new());
     }
 
     let seeding = !store.seeded;
     let since = (Utc::now() - Duration::hours(24)).to_rfc3339();
 
-    let discover_futures = repos.iter().map(|repo| {
-        let host = host.to_string();
-        let path = repo.path.clone();
-        let user = current_user.to_string();
-        let since = since.clone();
-        async move {
-            gitlab::discover_candidate_mrs(&host, &path, &user, &since)
-                .await
-                .map_err(|e| (path.clone(), e))
-        }
-    });
-    let discover_results = futures::future::join_all(discover_futures).await;
-
-    let mut candidates = Vec::new();
-    let mut seen = HashSet::new();
-    for result in discover_results {
-        match result {
-            Ok(mrs) => {
-                for c in mrs {
-                    let key = (c.project_id, c.iid);
-                    if seen.insert(key) {
-                        candidates.push(c);
-                    }
-                }
-            }
-            Err((_path, _e)) => {}
-        }
-    }
+    let candidates = gitlab::discover_candidate_mrs(host, current_user, &since)
+        .await
+        .unwrap_or_default();
 
     let mut new_items = Vec::new();
     let mut max_note_id = store.last_note_id;
@@ -443,7 +389,7 @@ pub async fn poll(
         .fold(store.last_todo_id, u64::max);
 
     if !seeding {
-        let todo_items = collect_new_todos(&todos, store.last_todo_id, current_user, repos);
+        let todo_items = collect_new_todos(&todos, store.last_todo_id, current_user);
         new_items.extend(todo_items);
     }
 
@@ -509,6 +455,39 @@ mod tests {
             Some(NotificationKind::ReviewRequested)
         );
         assert_eq!(todo_kind("mentioned"), None);
+    }
+
+    #[test]
+    fn repo_path_from_url_reads_the_project_before_the_dash() {
+        assert_eq!(
+            gitlab::repo_path_from_url(
+                "https://git.example.com/group/ext-service/-/merge_requests/12"
+            )
+            .as_deref(),
+            Some("group/ext-service")
+        );
+        assert_eq!(
+            gitlab::repo_path_from_url("https://git.example.com/group/other/-/pipelines/9")
+                .as_deref(),
+            Some("group/other")
+        );
+    }
+
+    #[test]
+    fn todos_include_projects_outside_config() {
+        let todos = vec![RestTodo {
+            id: 5,
+            action_name: "review_requested".into(),
+            author_username: "bob".into(),
+            body: None,
+            target_url: Some("https://git.example.com/group/other/-/merge_requests/3".into()),
+            target_title: Some("Add thing".into()),
+            created_at: Utc::now(),
+        }];
+        let items = collect_new_todos(&todos, 0, "alice");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].repo, "group/other");
+        assert_eq!(items[0].mr_iid.as_deref(), Some("3"));
     }
 
     #[test]

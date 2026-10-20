@@ -76,11 +76,10 @@ pub fn spawn(
             let store = Arc::clone(&notification_store);
             let tx = tx.clone();
             let host = host.clone();
-            let repos = repos.clone();
             let user = current_user.clone();
             notif_task = Some(tokio::spawn(async move {
                 let mut store = store.lock().await;
-                match crate::notifications::poll(&host, &repos, &user, &mut store).await {
+                match crate::notifications::poll(&host, &user, &mut store).await {
                     Ok(new_items) => {
                         let new_count = new_items.len();
                         let updated = store.clone();

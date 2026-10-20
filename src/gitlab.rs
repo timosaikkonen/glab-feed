@@ -3,11 +3,6 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use tokio::process::Command;
 
-/// Percent-encode a GitLab project path for REST URLs (`group/repo` -> `group%2Frepo`).
-fn encode_project_path(path: &str) -> String {
-    path.replace('/', "%2F")
-}
-
 /// Percent-encode a query-string value.
 fn encode_query(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
@@ -366,8 +361,25 @@ pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<Mer
 
 /// Run `glab api --hostname <host> <path>` and parse JSON.
 async fn run_rest<T: for<'de> Deserialize<'de>>(host: &str, path: &str) -> Result<T> {
-    let output = Command::new("glab")
-        .arg("api")
+    run_rest_inner(host, path, false).await
+}
+
+/// Same as [`run_rest`], following GitLab pagination and concatenating array pages.
+async fn run_rest_paginated<T: for<'de> Deserialize<'de>>(host: &str, path: &str) -> Result<T> {
+    run_rest_inner(host, path, true).await
+}
+
+async fn run_rest_inner<T: for<'de> Deserialize<'de>>(
+    host: &str,
+    path: &str,
+    paginate: bool,
+) -> Result<T> {
+    let mut cmd = Command::new("glab");
+    cmd.arg("api");
+    if paginate {
+        cmd.arg("--paginate");
+    }
+    let output = cmd
         .arg("--hostname")
         .arg(host)
         .arg(path)
@@ -381,6 +393,18 @@ async fn run_rest<T: for<'de> Deserialize<'de>>(host: &str, path: &str) -> Resul
     }
 
     serde_json::from_slice(&output.stdout).context("parsing glab REST JSON")
+}
+
+/// Project path from a GitLab URL: everything before `/-/`.
+pub fn repo_path_from_url(url: &str) -> Option<String> {
+    let after_host = url.split("://").nth(1)?;
+    let path = after_host.split('/').skip(1).collect::<Vec<_>>().join("/");
+    let repo = path.split("/-/").next()?.trim_matches('/');
+    if repo.is_empty() {
+        None
+    } else {
+        Some(repo.to_string())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -449,36 +473,38 @@ const MR_ROLES: &[(&str, &str)] = &[
     ("assignee_username", "assignee"),
 ];
 
-/// Open MRs in `repo_path` where `username` has one of author/reviewer/assignee roles.
+/// Open MRs the user authored, reviews, or is assigned, in every accessible
+/// project, updated at or after `since`.
 pub async fn discover_candidate_mrs(
     host: &str,
-    repo_path: &str,
     username: &str,
     since: &str,
 ) -> Result<Vec<MrCandidate>> {
-    let encoded = encode_project_path(repo_path);
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
 
     for (param, _) in MR_ROLES {
         let path = format!(
-            "projects/{encoded}/merge_requests?state=opened&{param}={}&updated_after={}\
-             &per_page=50&order_by=updated_at&sort=desc",
+            "merge_requests?scope=all&state=opened&{param}={}&updated_after={}\
+             &per_page=100&order_by=updated_at&sort=desc",
             encode_query(username),
             encode_query(since),
         );
-        let list: Vec<RestMr> = match run_rest(host, &path).await {
+        let list: Vec<RestMr> = match run_rest_paginated(host, &path).await {
             Ok(v) => v,
             Err(_) => continue,
         };
         for mr in list {
             let key = (mr.project_id, mr.iid);
+            let Some(repo_path) = repo_path_from_url(&mr.web_url) else {
+                continue;
+            };
             if seen.insert(key) {
                 out.push(MrCandidate {
                     project_id: mr.project_id,
                     iid: mr.iid,
                     web_url: mr.web_url,
-                    repo_path: repo_path.to_string(),
+                    repo_path,
                 });
             }
         }
