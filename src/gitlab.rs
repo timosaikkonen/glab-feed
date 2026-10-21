@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -77,7 +79,7 @@ impl CiStatus {
 }
 
 const MR_QUERY: &str = r#"
-query($fullPath: ID!) {
+query GlabFeedMergeRequests($fullPath: ID!) {
   project(fullPath: $fullPath) {
     mergeRequests(state: opened, sort: UPDATED_DESC, first: 50) {
       nodes {
@@ -195,24 +197,28 @@ struct CurrentUserData {
     current_user: Option<UserRef>,
 }
 
-/// Run `glab api graphql` with the given query and variables, returning parsed JSON.
-async fn run_graphql<T: for<'de> Deserialize<'de>>(
-    host: &str,
-    query: &str,
-    vars: &[(&str, &str)],
-) -> Result<T> {
-    let mut cmd = Command::new("glab");
-    cmd.arg("api")
+/// Run `glab api --hostname <host> <args>` and return stdout.
+///
+/// Every GitLab request goes through here. With `--debug`, each call logs
+/// `label`, whether glab paginates (possibly several HTTP requests), the
+/// duration, and the outcome.
+pub async fn glab_api(host: &str, args: &[String], label: &str) -> Result<Vec<u8>> {
+    let paginated = args.iter().any(|a| a == "--paginate");
+    let started = Instant::now();
+    let result = run_glab(host, args).await;
+    log::debug!(
+        "{}",
+        request_line(label, paginated, started.elapsed(), &result)
+    );
+    result
+}
+
+async fn run_glab(host: &str, args: &[String]) -> Result<Vec<u8>> {
+    let output = Command::new("glab")
+        .arg("api")
         .arg("--hostname")
         .arg(host)
-        .arg("graphql")
-        .arg("-f")
-        .arg(format!("query={query}"));
-    for (k, v) in vars {
-        cmd.arg("-f").arg(format!("{k}={v}"));
-    }
-
-    let output = cmd
+        .args(args)
         .output()
         .await
         .context("failed to spawn `glab`; is it installed and on PATH?")?;
@@ -221,12 +227,61 @@ async fn run_graphql<T: for<'de> Deserialize<'de>>(
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("glab exited with {}: {}", output.status, stderr.trim());
     }
+    Ok(output.stdout)
+}
 
-    let resp: GraphQlResponse<T> =
-        serde_json::from_slice(&output.stdout).context("parsing glab GraphQL JSON")?;
+fn request_line(
+    label: &str,
+    paginated: bool,
+    elapsed: Duration,
+    result: &Result<Vec<u8>>,
+) -> String {
+    let paginated = if paginated { " paginated" } else { "" };
+    let ms = elapsed.as_millis();
+    match result {
+        Ok(body) => format!("{label}{paginated} {ms}ms ok {}B", body.len()),
+        Err(e) => format!(
+            "{label}{paginated} {ms}ms failed: {}",
+            format!("{e:#}").replace('\n', " ")
+        ),
+    }
+}
+
+/// Name after the `query` keyword, e.g. `GlabFeedMergeRequests`.
+fn graphql_operation_name(query: &str) -> Option<&str> {
+    let rest = query.trim_start().strip_prefix("query")?;
+    let name = rest
+        .trim_start()
+        .split(|c: char| c == '(' || c == '{' || c.is_whitespace())
+        .next()?;
+    (!name.is_empty()).then_some(name)
+}
+
+/// Run `glab api graphql` with the given query and variables, returning parsed JSON.
+async fn run_graphql<T: for<'de> Deserialize<'de>>(
+    host: &str,
+    query: &str,
+    vars: &[(&str, &str)],
+) -> Result<T> {
+    let mut args = vec!["graphql".to_string(), "-f".into(), format!("query={query}")];
+    let mut label = format!(
+        "graphql {}",
+        graphql_operation_name(query).unwrap_or("anonymous")
+    );
+    for (k, v) in vars {
+        args.push("-f".into());
+        args.push(format!("{k}={v}"));
+        label.push_str(&format!(" {k}={v}"));
+    }
+
+    let body = glab_api(host, &args, &label).await?;
+    let resp: GraphQlResponse<T> = serde_json::from_slice(&body)
+        .context("parsing glab GraphQL JSON")
+        .inspect_err(|e| log::debug!("{label} failed: {e:#}"))?;
 
     if !resp.errors.is_empty() {
         let msgs: Vec<String> = resp.errors.into_iter().map(|e| e.message).collect();
+        log::debug!("{label} failed: GraphQL errors: {}", msgs.join("; "));
         anyhow::bail!("GraphQL errors: {}", msgs.join("; "));
     }
 
@@ -286,8 +341,12 @@ fn later(
 
 /// Fetch the authenticated user's username (used for the mine-only filter).
 pub async fn fetch_current_user(host: &str) -> Result<String> {
-    let data: CurrentUserData =
-        run_graphql(host, "query { currentUser { username } }", &[]).await?;
+    let data: CurrentUserData = run_graphql(
+        host,
+        "query GlabFeedCurrentUser { currentUser { username } }",
+        &[],
+    )
+    .await?;
     data.current_user
         .map(|u| u.username)
         .context("could not determine current user")
@@ -370,25 +429,17 @@ async fn run_rest_inner<T: for<'de> Deserialize<'de>>(
     path: &str,
     paginate: bool,
 ) -> Result<T> {
-    let mut cmd = Command::new("glab");
-    cmd.arg("api");
+    let mut args = Vec::new();
     if paginate {
-        cmd.arg("--paginate");
+        args.push("--paginate".to_string());
     }
-    let output = cmd
-        .arg("--hostname")
-        .arg(host)
-        .arg(path)
-        .output()
-        .await
-        .context("failed to spawn `glab`; is it installed and on PATH?")?;
+    args.push(path.to_string());
+    let label = format!("rest {path}");
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("glab exited with {}: {}", output.status, stderr.trim());
-    }
-
-    serde_json::from_slice(&output.stdout).context("parsing glab REST JSON")
+    let body = glab_api(host, &args, &label).await?;
+    serde_json::from_slice(&body)
+        .context("parsing glab REST JSON")
+        .inspect_err(|e| log::debug!("{label} failed: {e:#}"))
 }
 
 /// Project path from a GitLab URL: everything before `/-/`.
@@ -680,6 +731,40 @@ mod tests {
         assert_eq!(
             latest_update(&None, last_human, last_push),
             Some((UpdateActivity::Push, "bob".to_string()))
+        );
+    }
+
+    #[test]
+    fn graphql_operation_name_reads_the_query_name() {
+        assert_eq!(
+            graphql_operation_name(MR_QUERY),
+            Some("GlabFeedMergeRequests")
+        );
+        assert_eq!(
+            graphql_operation_name("query GlabFeedCurrentUser { currentUser { username } }"),
+            Some("GlabFeedCurrentUser")
+        );
+        assert_eq!(
+            graphql_operation_name("query { currentUser { username } }"),
+            None
+        );
+    }
+
+    #[test]
+    fn request_line_formats_outcome() {
+        let elapsed = std::time::Duration::from_millis(412);
+        assert_eq!(
+            request_line("rest todos", false, elapsed, &Ok(vec![0; 10])),
+            "rest todos 412ms ok 10B"
+        );
+        assert_eq!(
+            request_line("rest merge_requests", true, elapsed, &Ok(Vec::new())),
+            "rest merge_requests paginated 412ms ok 0B"
+        );
+        let failed: Result<Vec<u8>> = Err(anyhow::anyhow!("glab exited with 1: 502\nBad Gateway"));
+        assert_eq!(
+            request_line("rest todos", false, elapsed, &failed),
+            "rest todos 412ms failed: glab exited with 1: 502 Bad Gateway"
         );
     }
 

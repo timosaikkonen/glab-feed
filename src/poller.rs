@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
@@ -65,7 +66,14 @@ pub fn spawn(
             if tx.send(PollEvent::Started).await.is_err() {
                 break;
             }
+            let started = Instant::now();
             let update = poll_mrs(&host, &repos).await;
+            log::info!(
+                "mr poll: {} repos in {:.1}s ({} failed)",
+                repos.len(),
+                started.elapsed().as_secs_f64(),
+                update.results.iter().filter(|(_, r)| r.is_err()).count()
+            );
             if tx.send(PollEvent::Finished(update)).await.is_err() {
                 break; // app gone
             }

@@ -38,6 +38,13 @@ pub fn config_path() -> PathBuf {
         .join("config.toml")
 }
 
+pub fn debug_log_path() -> PathBuf {
+    dirs::config_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("glab-feed")
+        .join("debug.log")
+}
+
 pub fn notifications_path() -> PathBuf {
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))

@@ -2,9 +2,9 @@ use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use tokio::process::Command;
 
 use crate::config::RepoCfg;
+use crate::gitlab;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RepoFilter {
@@ -69,24 +69,10 @@ pub async fn fetch_projects(host: &str, filter: RepoFilter) -> Result<Vec<Projec
         endpoint.push_str(param);
     }
 
-    let output = Command::new("glab")
-        .arg("api")
-        .arg("--hostname")
-        .arg(host)
-        .arg("--paginate")
-        .arg("--output")
-        .arg("ndjson")
-        .arg(&endpoint)
-        .output()
-        .await
-        .context("failed to spawn `glab`; is it installed and on PATH?")?;
+    let args = ["--paginate", "--output", "ndjson", &endpoint].map(String::from);
+    let body = gitlab::glab_api(host, &args, &format!("rest {endpoint}")).await?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("glab exited with {}: {}", output.status, stderr.trim());
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
+    let text = String::from_utf8_lossy(&body);
     let mut projects: Vec<Project> = Vec::new();
     for line in text.lines() {
         let line = line.trim();

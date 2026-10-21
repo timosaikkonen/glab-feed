@@ -1,5 +1,6 @@
 mod app;
 mod config;
+mod debug_log;
 mod demo;
 mod gitlab;
 mod notifications;
@@ -41,6 +42,12 @@ async fn main() -> Result<()> {
     if std::env::args().any(|a| a == "--demo") {
         return run_demo().await;
     }
+    if std::env::args().any(|a| a == "--debug") {
+        if let Err(e) = debug_log::init(&config::debug_log_path()) {
+            eprintln!("{e:#}");
+            std::process::exit(1);
+        }
+    }
 
     // Missing config -> first-run setup inside the TUI. A present-but-invalid
     // config is a hard error.
@@ -58,6 +65,12 @@ async fn main() -> Result<()> {
 
     let host = cfg.as_ref().map(|c| c.host.clone()).unwrap_or_default();
     let repos = cfg.as_ref().map(|c| c.repos.clone()).unwrap_or_default();
+    log::info!(
+        "glab-feed {} starting: host={host}, {} repos, poll every {}s",
+        env!("CARGO_PKG_VERSION"),
+        repos.len(),
+        app::POLL_INTERVAL.as_secs()
+    );
 
     let current_user = if host.is_empty() {
         String::new()

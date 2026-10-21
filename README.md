@@ -81,6 +81,19 @@ Notifications are stored in the same config directory as `config.toml` (`notific
 | `Enter` | Save to `config.toml` and reload |
 | `Esc` / `q` | Cancel |
 
+## Debugging
+
+Run `glab-feed --debug` to append a log of GitLab traffic to `debug.log` in the same directory as `config.toml`. Without the flag nothing is logged.
+
+Each `glab api` call logs one line with the endpoint or GraphQL operation (including project paths), whether it is paginated, the duration, and whether it succeeded. Tokens are not logged. Each poll also logs a summary line. GraphQL queries are named `GlabFeed…`, so they can be found in GitLab's own logs too.
+
+```bash
+# Merge-request queries made so far
+grep -c GlabFeedMergeRequests ~/Library/Application\ Support/glab-feed/debug.log
+# Failed calls
+grep failed ~/Library/Application\ Support/glab-feed/debug.log
+```
+
 ## License
 
 MIT. See [LICENSE](LICENSE).

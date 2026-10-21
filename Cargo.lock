@@ -459,6 +459,7 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures",
+ "log",
  "open",
  "ratatui",
  "serde",

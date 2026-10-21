@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
@@ -307,6 +308,7 @@ pub async fn poll(
         return Ok(Vec::new());
     }
 
+    let started = Instant::now();
     let seeding = !store.seeded;
     let since = (Utc::now() - Duration::hours(24)).to_rfc3339();
 
@@ -430,6 +432,13 @@ pub async fn poll(
     store.last_note_id = max_note_id;
     store.last_todo_id = max_todo_id;
     store.seeded = true;
+
+    log::info!(
+        "notification poll: {} candidates, {} changed, {:.1}s",
+        candidates.len(),
+        changed.len(),
+        started.elapsed().as_secs_f64()
+    );
 
     if !seeding {
         let appended = new_items;
