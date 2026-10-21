@@ -576,7 +576,7 @@ fn build_notification_row(n: &crate::notifications::Notification, selected: bool
 fn render_footer(f: &mut Frame, app: &App, area: Rect) {
     let rows = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(area);
     let status_cols =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(20)]).split(rows[0]);
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(22)]).split(rows[0]);
 
     let status_line = if app.is_notifications_tab() {
         Line::from(Span::styled(

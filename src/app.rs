@@ -81,8 +81,13 @@ pub struct ApprovalEvent {
 /// Lifecycle events from the background poller.
 #[derive(Debug)]
 pub enum PollEvent {
-    Started,
+    /// `visible` is set when the repo tab on screen is part of this fetch.
+    Started {
+        visible: bool,
+    },
     Finished(PollUpdate),
+    /// When the tab on screen will next be refreshed.
+    NextPoll(Instant),
     NotificationsUpdated(NotificationUpdate),
 }
 
@@ -331,6 +336,9 @@ pub struct App {
     pub copy_menu: Option<usize>,
     /// When set, the footer shows a copy confirmation until this instant.
     pub copied: Option<(CopiedKind, Instant)>,
+    /// Whether the terminal window has focus. Terminals that never report
+    /// focus leave this true, which keeps the shorter poll intervals.
+    pub terminal_focused: bool,
     /// Whether `cmux` is on PATH (enables Opt-Enter to open in a split).
     pub cmux_available: bool,
     /// Whether to send cmux notifications (cmux on PATH and running inside cmux).
@@ -380,6 +388,7 @@ impl App {
             show_help: false,
             copy_menu: None,
             copied: None,
+            terminal_focused: true,
             cmux_available,
             cmux_notify_enabled,
             cmux_surface_ref: None,
@@ -632,9 +641,15 @@ impl App {
             .as_secs()
     }
 
-    pub fn handle_poll_started(&mut self) {
-        self.fetching = true;
-        self.poll_error = None;
+    pub fn handle_poll_started(&mut self, visible: bool) {
+        if visible {
+            self.fetching = true;
+            self.poll_error = None;
+        }
+    }
+
+    pub fn set_next_poll(&mut self, at: Instant) {
+        self.next_poll = at;
     }
 
     pub fn handle_poll_finished(&mut self, update: PollUpdate) -> Vec<ApprovalEvent> {
@@ -667,7 +682,6 @@ impl App {
             }
         }
         self.fetching = false;
-        self.next_poll = Instant::now() + POLL_INTERVAL;
         self.poll_error = if failures > 0 {
             Some(if failures == total {
                 "Fetch failed".to_string()

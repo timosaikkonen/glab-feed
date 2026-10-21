@@ -1,6 +1,6 @@
 # glab-feed
 
-A live-updating terminal UI for GitLab merge requests, built with [ratatui](https://ratatui.rs). It polls your configured repos every 15 seconds using the [`glab`](https://gitlab.com/gitlab-org/cli) CLI under the hood.
+A live-updating terminal UI for GitLab merge requests, built with [ratatui](https://ratatui.rs). It uses the [`glab`](https://gitlab.com/gitlab-org/cli) CLI under the hood. The open tab refreshes every 15 seconds, other tabs and notifications every minute, and everything every 5 minutes while the terminal is unfocused, which depends on the terminal reporting focus.
 
 ![glab-feed screenshot](screenshot.png)
 

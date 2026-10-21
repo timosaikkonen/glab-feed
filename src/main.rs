@@ -13,13 +13,14 @@ use std::time::Duration;
 
 use anyhow::Result;
 use crossterm::event::{
-    Event, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-    PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+    DisableFocusChange, EnableFocusChange, Event, EventStream, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use futures::StreamExt;
 use serde::Deserialize;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use app::{
     copy_payload, link_html, App, ApprovalEvent, CopiedKind, CopyChoice, PollEvent, SelectorUpdate,
@@ -30,6 +31,7 @@ use selector::RepoFilter;
 
 /// Shared channels the event loop needs when handling keys.
 struct Channels {
+    watch_tx: watch::Sender<poller::Watch>,
     refresh_tx: mpsc::Sender<()>,
     reconfigure_tx: mpsc::Sender<(String, Vec<RepoCfg>)>,
     selector_res_tx: mpsc::Sender<SelectorUpdate>,
@@ -66,10 +68,11 @@ async fn main() -> Result<()> {
     let host = cfg.as_ref().map(|c| c.host.clone()).unwrap_or_default();
     let repos = cfg.as_ref().map(|c| c.repos.clone()).unwrap_or_default();
     log::info!(
-        "glab-feed {} starting: host={host}, {} repos, poll every {}s",
+        "glab-feed {} starting: host={host}, {} repos, active poll {}s, background {}s",
         env!("CARGO_PKG_VERSION"),
         repos.len(),
-        app::POLL_INTERVAL.as_secs()
+        poller::ACTIVE_POLL.as_secs(),
+        poller::BACKGROUND_POLL.as_secs()
     );
 
     let current_user = if host.is_empty() {
@@ -92,6 +95,7 @@ async fn main() -> Result<()> {
         app.start_setup();
     }
 
+    let (watch_tx, watch_rx) = watch::channel(current_watch(&app));
     let (refresh_tx, refresh_rx) = mpsc::channel::<()>(1);
     let (reconfigure_tx, reconfigure_rx) = mpsc::channel::<(String, Vec<RepoCfg>)>(1);
     let (selector_res_tx, mut selector_res_rx) = mpsc::channel::<SelectorUpdate>(4);
@@ -103,12 +107,14 @@ async fn main() -> Result<()> {
         repos,
         current_user,
         notification_store,
+        watch_rx,
         refresh_rx,
         reconfigure_rx,
         user_poll_rx,
     );
 
     let channels = Channels {
+        watch_tx,
         refresh_tx,
         reconfigure_tx,
         selector_res_tx,
@@ -123,6 +129,7 @@ async fn main() -> Result<()> {
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
         ),
+        EnableFocusChange,
     );
     let result = {
         let _pop_keyboard = PopKeyboardOnDrop;
@@ -147,6 +154,7 @@ async fn main() -> Result<()> {
 
 async fn run_demo() -> Result<()> {
     let mut app = demo::app();
+    let (watch_tx, _watch_rx) = watch::channel(current_watch(&app));
     let (refresh_tx, _refresh_rx) = mpsc::channel::<()>(1);
     let (reconfigure_tx, _reconfigure_rx) = mpsc::channel::<(String, Vec<RepoCfg>)>(1);
     let (selector_res_tx, mut selector_res_rx) = mpsc::channel::<SelectorUpdate>(4);
@@ -154,6 +162,7 @@ async fn run_demo() -> Result<()> {
     let (user_poll_tx, _user_poll_rx) = mpsc::channel::<String>(1);
     let mut updates = mpsc::channel::<PollEvent>(1).1;
     let channels = Channels {
+        watch_tx,
         refresh_tx,
         reconfigure_tx,
         selector_res_tx,
@@ -173,6 +182,7 @@ async fn run_demo() -> Result<()> {
             KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS,
         ),
+        EnableFocusChange,
     );
     let result = {
         let _pop_keyboard = PopKeyboardOnDrop;
@@ -221,7 +231,7 @@ async fn run(
             // Poll lifecycle from the poller.
             Some(event) = updates.recv() => {
                 match event {
-                    PollEvent::Started => app.handle_poll_started(),
+                    PollEvent::Started { visible } => app.handle_poll_started(visible),
                     PollEvent::Finished(update) => {
                         let approvals = app.handle_poll_finished(update);
                         if app.cmux_notify_enabled {
@@ -238,6 +248,7 @@ async fn run(
                         }
                         app.handle_notifications_updated(update);
                     }
+                    PollEvent::NextPoll(at) => app.set_next_poll(at),
                 }
             }
 
@@ -255,8 +266,17 @@ async fn run(
             // Terminal input.
             maybe_event = events.next() => {
                 match maybe_event {
+                    Some(Ok(Event::FocusGained)) => {
+                        app.terminal_focused = true;
+                        sync_watch(app, channels);
+                    }
+                    Some(Ok(Event::FocusLost)) => {
+                        app.terminal_focused = false;
+                        sync_watch(app, channels);
+                    }
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
                         handle_key(app, key, channels);
+                        sync_watch(app, channels);
                     }
                     Some(Ok(_)) => {}
                     Some(Err(_)) | None => break,
@@ -273,11 +293,36 @@ async fn run(
     Ok(())
 }
 
+fn current_watch(app: &App) -> poller::Watch {
+    let view = if app.is_notifications_tab() {
+        poller::WatchView::Notifications
+    } else if let Some(repo) = app.repos.get(app.selected_tab) {
+        poller::WatchView::Repo(repo.path.clone())
+    } else {
+        poller::WatchView::Notifications
+    };
+    poller::Watch {
+        view,
+        focused: app.terminal_focused,
+    }
+}
+
+fn sync_watch(app: &App, channels: &Channels) {
+    let next = current_watch(app);
+    if *channels.watch_tx.borrow() != next {
+        let _ = channels.watch_tx.send(next);
+    }
+}
+
 struct PopKeyboardOnDrop;
 
 impl Drop for PopKeyboardOnDrop {
     fn drop(&mut self) {
-        let _ = execute!(std::io::stdout(), PopKeyboardEnhancementFlags);
+        let _ = execute!(
+            std::io::stdout(),
+            PopKeyboardEnhancementFlags,
+            DisableFocusChange,
+        );
     }
 }
 

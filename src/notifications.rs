@@ -152,53 +152,52 @@ fn mr_iid_from_url(url: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-async fn collect_new_notes(
-    host: &str,
-    candidate: &MrCandidate,
-    last_note_id: u64,
-    current_user: &str,
-) -> Result<Vec<Notification>> {
-    let notes = gitlab::fetch_mr_notes(host, candidate.project_id, candidate.iid).await?;
-    let mut out = Vec::new();
-    for n in notes {
-        if n.system || n.author_username == current_user {
-            continue;
-        }
-        if n.id <= last_note_id {
-            continue;
-        }
-        out.push(Notification {
-            id: format!("note:{}", n.id),
-            kind: NotificationKind::Comment,
-            at: n.created_at,
-            author: n.author_username.clone(),
-            summary: snippet(&n.body),
-            url: format!("{}#note_{}", candidate.web_url, n.id),
-            repo: candidate.repo_path.clone(),
-            mr_iid: Some(candidate.iid.to_string()),
-        });
-    }
-    Ok(out)
-}
-
-fn user_wrote_in_thread(discussion: &Discussion, current_user: &str) -> bool {
-    discussion
-        .notes
-        .iter()
-        .any(|n| !n.system && n.author_username == current_user)
-}
-
-/// Highest note id in threads the user has written in.
-fn participated_thread_high_water(discussions: &[Discussion], current_user: &str) -> u64 {
+fn discussion_high_water(discussions: &[Discussion]) -> u64 {
     discussions
         .iter()
-        .filter(|d| !d.individual_note && user_wrote_in_thread(d, current_user))
-        .flat_map(|d| d.notes.iter().map(|n| n.id))
+        .flat_map(|discussion| discussion.notes.iter().map(|note| note.id))
         .max()
         .unwrap_or(0)
 }
 
-/// Replies, in threads the user has written in, that the notes API does not return.
+/// Standalone comments, and the root note of a thread. Replies stay with
+/// [`collect_thread_replies`].
+fn collect_discussion_comments(
+    discussions: &[Discussion],
+    candidate: &MrCandidate,
+    last_note_id: u64,
+    current_user: &str,
+) -> Vec<Notification> {
+    let mut out = Vec::new();
+    for discussion in discussions {
+        for note in &discussion.notes {
+            if note.system || note.author_username == current_user || note.id <= last_note_id {
+                continue;
+            }
+            if !discussion.individual_note && note.note_type.is_some() {
+                continue;
+            }
+            out.push(Notification {
+                id: format!("note:{}", note.id),
+                kind: NotificationKind::Comment,
+                at: note.created_at,
+                author: note.author_username.clone(),
+                summary: snippet(&note.body),
+                url: format!("{}#note_{}", candidate.web_url, note.id),
+                repo: candidate.repo_path.clone(),
+                mr_iid: Some(candidate.iid.to_string()),
+            });
+        }
+    }
+    out
+}
+
+/// The full pending page is only worth fetching when a newer todo exists.
+fn should_fetch_todo_page(newest: Option<u64>, last_todo_id: u64) -> bool {
+    newest.is_some_and(|id| id > last_todo_id)
+}
+
+/// Replies, in threads the user has written in.
 fn collect_thread_replies(
     discussions: &[Discussion],
     candidate: &MrCandidate,
@@ -321,52 +320,6 @@ pub async fn poll(
 
     let mut new_items = Vec::new();
     let mut max_note_id = store.last_note_id;
-    let mut notes_read = HashSet::new();
-
-    if seeding {
-        let seed_futures = changed.iter().map(|candidate| {
-            let host = host.to_string();
-            let (project_id, iid) = candidate.key();
-            async move {
-                let result = gitlab::fetch_mr_latest_note_id(&host, project_id, iid).await;
-                ((project_id, iid), result)
-            }
-        });
-        for (key, result) in futures::future::join_all(seed_futures).await {
-            let Ok(latest) = result else {
-                continue;
-            };
-            notes_read.insert(key);
-            if let Some(id) = latest {
-                max_note_id = max_note_id.max(id);
-            }
-        }
-    } else {
-        let note_futures = changed.iter().map(|candidate| {
-            let host = host.to_string();
-            let candidate = candidate.clone();
-            let user = current_user.to_string();
-            let last_note_id = store.last_note_id;
-            async move {
-                let result = collect_new_notes(&host, &candidate, last_note_id, &user).await;
-                (candidate.key(), result)
-            }
-        });
-        for (key, result) in futures::future::join_all(note_futures).await {
-            let Ok(notes) = result else {
-                continue;
-            };
-            notes_read.insert(key);
-            for n in &notes {
-                if let Some(id) = n.id.strip_prefix("note:") {
-                    if let Ok(num) = id.parse::<u64>() {
-                        max_note_id = max_note_id.max(num);
-                    }
-                }
-            }
-            new_items.extend(notes);
-        }
-    }
 
     let discussion_futures = changed.iter().map(|candidate| {
         let host = host.to_string();
@@ -377,15 +330,22 @@ pub async fn poll(
                 .map(|discussions| (candidate, discussions))
         }
     });
-    let mut reply_high_water = 0u64;
     let mut replies = Vec::new();
+    let emit_replies = !seeding && store.replies_seeded;
     for result in futures::future::join_all(discussion_futures).await {
         let Ok((candidate, discussions)) = result else {
             continue;
         };
-        reply_high_water =
-            reply_high_water.max(participated_thread_high_water(&discussions, current_user));
-        if !seeding && store.replies_seeded {
+        max_note_id = max_note_id.max(discussion_high_water(&discussions));
+        if !seeding {
+            new_items.extend(collect_discussion_comments(
+                &discussions,
+                &candidate,
+                store.last_note_id,
+                current_user,
+            ));
+        }
+        if emit_replies {
             replies.extend(collect_thread_replies(
                 &discussions,
                 &candidate,
@@ -393,44 +353,40 @@ pub async fn poll(
                 current_user,
             ));
         }
-        if notes_read.contains(&candidate.key()) {
-            store
-                .mr_updated_at
-                .insert(candidate.key(), candidate.updated_at);
-        }
+        store
+            .mr_updated_at
+            .insert(candidate.key(), candidate.updated_at);
     }
-    if seeding || !store.replies_seeded {
-        max_note_id = max_note_id.max(reply_high_water);
-        store.replies_seeded = true;
-    } else {
-        {
-            let reply_ids: HashSet<&str> = replies.iter().map(|n| n.id.as_str()).collect();
-            new_items.retain(|n| !reply_ids.contains(n.id.as_str()));
-        }
-        for n in &replies {
-            if let Some(id) = n.id.strip_prefix("note:") {
-                if let Ok(num) = id.parse::<u64>() {
-                    max_note_id = max_note_id.max(num);
-                }
-            }
-        }
-        max_note_id = max_note_id.max(reply_high_water);
+    if emit_replies {
+        let reply_ids: HashSet<&str> = replies.iter().map(|n| n.id.as_str()).collect();
+        new_items.retain(|n| !reply_ids.contains(n.id.as_str()));
         new_items.extend(replies);
     }
+    store.replies_seeded = true;
 
-    let todos = gitlab::fetch_pending_todos(host).await.unwrap_or_default();
-    let max_todo_id = todos
-        .iter()
-        .map(|t| t.id)
-        .fold(store.last_todo_id, u64::max);
+    let todo_probe = gitlab::fetch_newest_pending_todo_id(host).await;
+    let todos = if seeding {
+        if let Ok(Some(id)) = todo_probe {
+            store.last_todo_id = store.last_todo_id.max(id);
+        }
+        Vec::new()
+    } else if matches!(todo_probe, Ok(newest) if !should_fetch_todo_page(newest, store.last_todo_id))
+    {
+        Vec::new()
+    } else {
+        gitlab::fetch_pending_todos(host).await.unwrap_or_default()
+    };
 
     if !seeding {
         let todo_items = collect_new_todos(&todos, store.last_todo_id, current_user);
         new_items.extend(todo_items);
+        store.last_todo_id = todos
+            .iter()
+            .map(|todo| todo.id)
+            .fold(store.last_todo_id, u64::max);
     }
 
     store.last_note_id = max_note_id;
-    store.last_todo_id = max_todo_id;
     store.seeded = true;
 
     log::info!(
@@ -602,7 +558,6 @@ mod tests {
             NotificationKind::CommentReply.verb(),
             "replied to your comment"
         );
-        assert_eq!(participated_thread_high_water(&discussions, "me"), 12);
     }
 
     #[test]
@@ -629,8 +584,6 @@ mod tests {
         let replies = collect_thread_replies(&discussions, &candidate(), 0, "me");
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0].id, "note:9");
-        assert_eq!(participated_thread_high_water(&discussions, "me"), 20);
-        assert_eq!(participated_thread_high_water(&discussions, "nobody"), 0);
     }
 
     #[test]
@@ -652,5 +605,30 @@ mod tests {
 
         let already_seen = collect_thread_replies(&discussions, &candidate(), 12, "me");
         assert!(already_seen.is_empty());
+    }
+
+    #[test]
+    fn individual_note_becomes_a_comment_notification() {
+        let discussions = vec![Discussion {
+            individual_note: true,
+            notes: vec![thread_note(40, "dave", None)],
+        }];
+        let comments = collect_discussion_comments(&discussions, &candidate(), 0, "me");
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].kind, NotificationKind::Comment);
+        assert_eq!(comments[0].id, "note:40");
+        assert_eq!(comments[0].author, "dave");
+        assert_eq!(
+            comments[0].url,
+            "https://git.example.com/group/repo/-/merge_requests/7#note_40"
+        );
+    }
+
+    #[test]
+    fn seen_newest_todo_does_not_fetch_the_full_list() {
+        assert!(!should_fetch_todo_page(Some(5), 5));
+        assert!(!should_fetch_todo_page(Some(4), 5));
+        assert!(!should_fetch_todo_page(None, 0));
+        assert!(should_fetch_todo_page(Some(6), 5));
     }
 }

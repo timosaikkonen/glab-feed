@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -87,7 +88,6 @@ query GlabFeedMergeRequests($fullPath: ID!) {
         author { username name }
         approvedBy { nodes { username } }
         userNotesCount
-        notes(last: 30) { nodes { author { username } createdAt system systemNoteIconName } }
         headPipeline { status user { username } createdAt }
       }
     }
@@ -144,7 +144,6 @@ struct MrNode {
     approved_by: UserConnection,
     #[serde(rename = "userNotesCount")]
     user_notes_count: u32,
-    notes: NoteConnection,
     #[serde(rename = "headPipeline")]
     head_pipeline: Option<Pipeline>,
 }
@@ -353,63 +352,166 @@ pub async fn fetch_current_user(host: &str) -> Result<String> {
 }
 
 /// Fetch open merge requests for a single project path.
-pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<MergeRequest>> {
+///
+/// The list query does not ask for notes. Notes are loaded only for merge
+/// requests whose `updated_at` differs from `previous` (including new ones);
+/// the rest reuse the previous comment and push activity.
+pub async fn fetch_merge_requests(
+    host: &str,
+    full_path: &str,
+    previous: &[MergeRequest],
+) -> Result<Vec<MergeRequest>> {
     let data: ProjectData = run_graphql(host, MR_QUERY, &[("fullPath", full_path)]).await?;
     let project = data
         .project
         .with_context(|| format!("project `{full_path}` not found or not accessible"))?;
 
-    let mrs = project
+    let mut drafts: Vec<Draft> = project
         .merge_requests
         .nodes
         .into_iter()
-        .map(|n| {
-            // Most recent non-system note = last human commenter.
-            let last_human = n.notes.nodes.iter().rev().find(|note| !note.system);
-            let last_push = n.notes.nodes.iter().rev().find(|note| note.is_push());
-            let (author, name) = match n.author {
-                Some(u) => (u.username, u.name.unwrap_or_default()),
-                None => (String::new(), String::new()),
-            };
-            let approved_by = n
-                .approved_by
-                .nodes
-                .iter()
-                .map(|u| u.username.clone())
-                .collect::<Vec<_>>();
-            MergeRequest {
-                iid: n.iid,
-                title: n.title,
-                web_url: n.web_url,
-                author_username: author,
-                author_name: name,
-                approved_by: approved_by.clone(),
-                // `MergeRequest.approved` is true whenever approval requirements
-                // are met, including when zero approvals are required. Treat an
-                // MR as approved only when someone has actually approved it.
-                approved: !approved_by.is_empty(),
-                draft: n.draft,
-                has_conflicts: n.conflicts,
-                notes_count: n.user_notes_count,
-                last_note_author: last_human
-                    .and_then(|note| note.author.as_ref().map(|a| a.username.clone())),
-                last_note_at: last_human.map(|note| note.created_at),
-                ci: CiStatus::from_gitlab(
-                    n.head_pipeline.as_ref().and_then(|p| p.status.as_deref()),
-                ),
-                created_at: n.created_at,
-                updated_at: n.updated_at,
-                source_branch: n.source_branch,
-                last_update: latest_update(&n.head_pipeline, last_human, last_push),
+        .map(draft_from_node)
+        .collect();
+    let need: Vec<String> = drafts
+        .iter()
+        .filter(|draft| needs_notes(previous, &draft.mr.iid, draft.mr.updated_at))
+        .map(|draft| draft.mr.iid.clone())
+        .collect();
+    for draft in &mut drafts {
+        if !needs_notes(previous, &draft.mr.iid, draft.mr.updated_at) {
+            copy_activity(previous, &mut draft.mr);
+        }
+    }
+    if !need.is_empty() {
+        let notes = fetch_recent_notes(host, full_path, &need).await?;
+        for draft in &mut drafts {
+            if let Some(nodes) = notes.get(&draft.mr.iid) {
+                apply_notes(&mut draft.mr, &draft.pipeline, nodes);
             }
-        })
-        .collect::<Vec<_>>();
+        }
+    }
 
-    // API already returns UPDATED_DESC; re-sort defensively.
-    let mut mrs = mrs;
+    let mut mrs: Vec<MergeRequest> = drafts.into_iter().map(|draft| draft.mr).collect();
     mrs.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-
     Ok(mrs)
+}
+
+struct Draft {
+    mr: MergeRequest,
+    pipeline: Option<Pipeline>,
+}
+
+fn draft_from_node(n: MrNode) -> Draft {
+    let (author, name) = match n.author {
+        Some(u) => (u.username, u.name.unwrap_or_default()),
+        None => (String::new(), String::new()),
+    };
+    let approved_by = n
+        .approved_by
+        .nodes
+        .iter()
+        .map(|u| u.username.clone())
+        .collect::<Vec<_>>();
+    let mr = MergeRequest {
+        iid: n.iid,
+        title: n.title,
+        web_url: n.web_url,
+        author_username: author,
+        author_name: name,
+        approved_by: approved_by.clone(),
+        // `MergeRequest.approved` is true whenever approval requirements
+        // are met, including when zero approvals are required. Treat an
+        // MR as approved only when someone has actually approved it.
+        approved: !approved_by.is_empty(),
+        draft: n.draft,
+        has_conflicts: n.conflicts,
+        notes_count: n.user_notes_count,
+        last_note_author: None,
+        last_note_at: None,
+        ci: CiStatus::from_gitlab(n.head_pipeline.as_ref().and_then(|p| p.status.as_deref())),
+        created_at: n.created_at,
+        updated_at: n.updated_at,
+        source_branch: n.source_branch,
+        last_update: latest_update(&n.head_pipeline, None, None),
+    };
+    Draft {
+        mr,
+        pipeline: n.head_pipeline,
+    }
+}
+
+fn needs_notes(previous: &[MergeRequest], iid: &str, updated_at: DateTime<Utc>) -> bool {
+    !previous
+        .iter()
+        .any(|mr| mr.iid == iid && mr.updated_at == updated_at)
+}
+
+fn copy_activity(previous: &[MergeRequest], mr: &mut MergeRequest) {
+    let Some(prev) = previous
+        .iter()
+        .find(|prev| prev.iid == mr.iid && prev.updated_at == mr.updated_at)
+    else {
+        return;
+    };
+    mr.last_note_author = prev.last_note_author.clone();
+    mr.last_note_at = prev.last_note_at;
+    mr.last_update = prev.last_update.clone();
+}
+
+fn apply_notes(mr: &mut MergeRequest, pipeline: &Option<Pipeline>, notes: &[NoteNode]) {
+    let last_human = notes.iter().rev().find(|note| !note.system);
+    let last_push = notes.iter().rev().find(|note| note.is_push());
+    mr.last_note_author =
+        last_human.and_then(|note| note.author.as_ref().map(|a| a.username.clone()));
+    mr.last_note_at = last_human.map(|note| note.created_at);
+    mr.last_update = latest_update(pipeline, last_human, last_push);
+}
+
+async fn fetch_recent_notes(
+    host: &str,
+    full_path: &str,
+    iids: &[String],
+) -> Result<HashMap<String, Vec<NoteNode>>> {
+    let mut query = String::from(
+        "query GlabFeedMergeRequestNotes($fullPath: ID!) { project(fullPath: $fullPath) {",
+    );
+    let mut added = false;
+    for iid in iids {
+        if !iid.chars().all(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        added = true;
+        query.push_str(&format!(
+            " mr_{iid}: mergeRequest(iid: \"{iid}\") {{ notes(last: 30) {{ nodes {{ author {{ username }} createdAt system systemNoteIconName }} }} }}"
+        ));
+    }
+    if !added {
+        return Ok(HashMap::new());
+    }
+    query.push_str(" } }");
+
+    #[derive(Deserialize)]
+    struct NotesData {
+        project: Option<HashMap<String, Option<NotesMr>>>,
+    }
+    #[derive(Deserialize)]
+    struct NotesMr {
+        notes: NoteConnection,
+    }
+
+    let data: NotesData = run_graphql(host, &query, &[("fullPath", full_path)]).await?;
+    let mut out = HashMap::new();
+    if let Some(project) = data.project {
+        for (alias, mr) in project {
+            let Some(iid) = alias.strip_prefix("mr_") else {
+                continue;
+            };
+            if let Some(mr) = mr {
+                out.insert(iid.to_string(), mr.notes.nodes);
+            }
+        }
+    }
+    Ok(out)
 }
 
 // ----- REST API (via `glab api`) -----
@@ -470,15 +572,6 @@ impl MrCandidate {
 }
 
 #[derive(Debug, Clone)]
-pub struct RestNote {
-    pub id: u64,
-    pub author_username: String,
-    pub body: String,
-    pub created_at: DateTime<Utc>,
-    pub system: bool,
-}
-
-#[derive(Debug, Clone)]
 pub struct RestTodo {
     pub id: u64,
     pub action_name: String,
@@ -495,15 +588,6 @@ struct RestMr {
     project_id: u64,
     web_url: String,
     updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RestNoteRaw {
-    id: u64,
-    body: String,
-    system: bool,
-    author: Option<UserRef>,
-    created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -569,26 +653,38 @@ pub async fn discover_candidate_mrs(
     Ok(out)
 }
 
-/// Notes on an MR, oldest first.
-pub async fn fetch_mr_notes(host: &str, project_id: u64, iid: u32) -> Result<Vec<RestNote>> {
-    let path = format!(
-        "projects/{project_id}/merge_requests/{iid}/notes\
-         ?sort=asc&order_by=created_at&per_page=100"
-    );
-    let raw: Vec<RestNoteRaw> = run_rest(host, &path).await?;
-    Ok(raw
-        .into_iter()
-        .map(|n| RestNote {
-            id: n.id,
-            author_username: n
+/// Pending todos for the authenticated user, newest id first.
+pub async fn fetch_pending_todos(host: &str) -> Result<Vec<RestTodo>> {
+    let raw: Vec<RestTodoRaw> = run_rest(
+        host,
+        "todos?state=pending&per_page=50&order_by=id&sort=desc",
+    )
+    .await?;
+    Ok(map_todos(raw))
+}
+
+/// Id of the newest pending todo, if the user has any.
+pub async fn fetch_newest_pending_todo_id(host: &str) -> Result<Option<u64>> {
+    let raw: Vec<RestTodoRaw> =
+        run_rest(host, "todos?state=pending&per_page=1&order_by=id&sort=desc").await?;
+    Ok(raw.first().map(|todo| todo.id))
+}
+
+fn map_todos(raw: Vec<RestTodoRaw>) -> Vec<RestTodo> {
+    raw.into_iter()
+        .map(|t| RestTodo {
+            id: t.id,
+            action_name: t.action_name,
+            author_username: t
                 .author
                 .map(|a| a.username)
                 .unwrap_or_else(|| "unknown".to_string()),
-            body: n.body,
-            created_at: n.created_at,
-            system: n.system,
+            body: t.body,
+            target_url: t.target_url,
+            target_title: t.target.and_then(|tg| tg.title),
+            created_at: t.created_at,
         })
-        .collect())
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -600,8 +696,8 @@ pub struct Discussion {
 #[derive(Debug, Clone)]
 pub struct DiscussionNote {
     pub id: u64,
-    /// `DiffNote` / `DiscussionNote` for thread notes. `None` for a root comment,
-    /// which the notes API already returns.
+    /// `DiffNote` / `DiscussionNote` for a reply. `None` for a standalone comment
+    /// or the root note of a thread.
     pub note_type: Option<String>,
     pub author_username: String,
     pub body: String,
@@ -629,9 +725,7 @@ struct RestDiscussionNoteRaw {
 const DISCUSSION_PAGE_SIZE: usize = 100;
 const DISCUSSION_MAX_PAGES: u32 = 10;
 
-/// Discussion threads on an MR, including diff notes and replies.
-///
-/// Those notes are `DiscussionNote`s. The notes API does not return them.
+/// Discussion threads on an MR. Standalone comments and replies both arrive here.
 pub async fn fetch_mr_discussions(
     host: &str,
     project_id: u64,
@@ -670,36 +764,6 @@ pub async fn fetch_mr_discussions(
         }
     }
     Ok(all)
-}
-
-/// Most recent note id on an MR, if any (used to seed the notification cursor).
-pub async fn fetch_mr_latest_note_id(host: &str, project_id: u64, iid: u32) -> Result<Option<u64>> {
-    let path = format!(
-        "projects/{project_id}/merge_requests/{iid}/notes\
-         ?sort=desc&order_by=created_at&per_page=1"
-    );
-    let raw: Vec<RestNoteRaw> = run_rest(host, &path).await?;
-    Ok(raw.first().map(|n| n.id))
-}
-
-/// Pending todos for the authenticated user.
-pub async fn fetch_pending_todos(host: &str) -> Result<Vec<RestTodo>> {
-    let raw: Vec<RestTodoRaw> = run_rest(host, "todos?state=pending&per_page=50").await?;
-    Ok(raw
-        .into_iter()
-        .map(|t| RestTodo {
-            id: t.id,
-            action_name: t.action_name,
-            author_username: t
-                .author
-                .map(|a| a.username)
-                .unwrap_or_else(|| "unknown".to_string()),
-            body: t.body,
-            target_url: t.target_url,
-            target_title: t.target.and_then(|tg| tg.title),
-            created_at: t.created_at,
-        })
-        .collect())
 }
 
 #[cfg(test)]
@@ -772,5 +836,53 @@ mod tests {
     fn other_system_notes_are_not_pushes() {
         assert!(!note("carol", 1, true, Some("approval")).is_push());
         assert!(!note("alice", 1, false, Some("commit")).is_push());
+    }
+
+    fn sample_mr(iid: &str, updated_at: DateTime<Utc>) -> MergeRequest {
+        MergeRequest {
+            iid: iid.to_string(),
+            title: "title".to_string(),
+            web_url: "https://example.test".to_string(),
+            author_name: "Alice".to_string(),
+            author_username: "alice".to_string(),
+            approved_by: Vec::new(),
+            approved: false,
+            draft: false,
+            has_conflicts: false,
+            notes_count: 2,
+            last_note_author: Some("alice".to_string()),
+            last_note_at: Some(updated_at),
+            ci: CiStatus::None,
+            created_at: updated_at,
+            updated_at,
+            source_branch: "feature".to_string(),
+            last_update: Some((UpdateActivity::Push, "alice".to_string())),
+        }
+    }
+
+    #[test]
+    fn unchanged_updated_at_keeps_comment_and_push_activity() {
+        let updated_at = Utc::now();
+        let previous = sample_mr("12", updated_at);
+        let mut fresh = sample_mr("12", updated_at);
+        fresh.last_note_author = None;
+        fresh.last_note_at = None;
+        fresh.last_update = None;
+
+        assert!(!needs_notes(&[previous.clone()], "12", updated_at));
+        assert!(needs_notes(&[previous.clone()], "13", updated_at));
+        assert!(needs_notes(
+            &[previous.clone()],
+            "12",
+            updated_at + Duration::seconds(1)
+        ));
+
+        copy_activity(&[previous], &mut fresh);
+        assert_eq!(fresh.last_note_author.as_deref(), Some("alice"));
+        assert_eq!(fresh.last_note_at, Some(updated_at));
+        assert_eq!(
+            fresh.last_update,
+            Some((UpdateActivity::Push, "alice".to_string()))
+        );
     }
 }
