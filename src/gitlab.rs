@@ -467,51 +467,72 @@ fn apply_notes(mr: &mut MergeRequest, pipeline: &Option<Pipeline>, notes: &[Note
     mr.last_update = latest_update(pipeline, last_human, last_push);
 }
 
+/// One `mergeRequest` alias costs about 10 complexity points. Fifty of them
+/// score 501, past the authenticated limit of 250. The same notes on one
+/// `mergeRequests(iids:)` connection score about 50, so a page of 50 stays
+/// inside the limit.
+const NOTES_PAGE: usize = 50;
+
 async fn fetch_recent_notes(
     host: &str,
     full_path: &str,
     iids: &[String],
 ) -> Result<HashMap<String, Vec<NoteNode>>> {
-    let mut query = String::from(
-        "query GlabFeedMergeRequestNotes($fullPath: ID!) { project(fullPath: $fullPath) {",
-    );
-    let mut added = false;
-    for iid in iids {
-        if !iid.chars().all(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        added = true;
-        query.push_str(&format!(
-            " mr_{iid}: mergeRequest(iid: \"{iid}\") {{ notes(last: 30) {{ nodes {{ author {{ username }} createdAt system systemNoteIconName }} }} }}"
-        ));
-    }
-    if !added {
-        return Ok(HashMap::new());
-    }
-    query.push_str(" } }");
-
-    #[derive(Deserialize)]
-    struct NotesData {
-        project: Option<HashMap<String, Option<NotesMr>>>,
-    }
-    #[derive(Deserialize)]
-    struct NotesMr {
-        notes: NoteConnection,
-    }
-
-    let data: NotesData = run_graphql(host, &query, &[("fullPath", full_path)]).await?;
+    let iids: Vec<&str> = iids
+        .iter()
+        .map(String::as_str)
+        .filter(|iid| iid.chars().all(|c| c.is_ascii_digit()))
+        .collect();
     let mut out = HashMap::new();
-    if let Some(project) = data.project {
-        for (alias, mr) in project {
-            let Some(iid) = alias.strip_prefix("mr_") else {
-                continue;
-            };
-            if let Some(mr) = mr {
-                out.insert(iid.to_string(), mr.notes.nodes);
-            }
+    for chunk in iids.chunks(NOTES_PAGE) {
+        let data: NotesData =
+            run_graphql(host, &notes_query(chunk), &[("fullPath", full_path)]).await?;
+        let Some(project) = data.project else {
+            continue;
+        };
+        for mr in project.merge_requests.nodes {
+            out.insert(mr.iid, mr.notes.nodes);
         }
     }
     Ok(out)
+}
+
+fn notes_query(iids: &[&str]) -> String {
+    let list = iids
+        .iter()
+        .map(|iid| format!("\"{iid}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "query GlabFeedMergeRequestNotes($fullPath: ID!) {{ \
+         project(fullPath: $fullPath) {{ \
+         mergeRequests(iids: [{list}], first: {first}) {{ \
+         nodes {{ iid notes(last: 30) {{ nodes {{ author {{ username }} createdAt system systemNoteIconName }} }} }} \
+         }} }} }}",
+        first = iids.len()
+    )
+}
+
+#[derive(Deserialize)]
+struct NotesData {
+    project: Option<NotesProject>,
+}
+
+#[derive(Deserialize)]
+struct NotesProject {
+    #[serde(rename = "mergeRequests")]
+    merge_requests: NotesConnection,
+}
+
+#[derive(Deserialize)]
+struct NotesConnection {
+    nodes: Vec<NotesMr>,
+}
+
+#[derive(Deserialize)]
+struct NotesMr {
+    iid: String,
+    notes: NoteConnection,
 }
 
 // ----- REST API (via `glab api`) -----
@@ -884,5 +905,13 @@ mod tests {
             fresh.last_update,
             Some((UpdateActivity::Push, "alice".to_string()))
         );
+    }
+
+    #[test]
+    fn notes_query_loads_iids_in_one_connection() {
+        let query = notes_query(&["12", "13"]);
+        assert!(query.starts_with("query GlabFeedMergeRequestNotes"));
+        assert!(query.contains("mergeRequests(iids: [\"12\", \"13\"], first: 2)"));
+        assert!(!query.contains("mr_12:"));
     }
 }
