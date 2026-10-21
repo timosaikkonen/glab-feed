@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 
 use anyhow::{Context, Result};
@@ -58,6 +58,10 @@ pub struct NotificationStore {
     #[serde(default)]
     pub replies_seeded: bool,
     pub items: Vec<Notification>,
+    /// `updated_at` of each candidate MR when its notes and discussions were last
+    /// read, keyed by `(project_id, iid)`. Unchanged MRs are not refetched.
+    #[serde(skip)]
+    pub mr_updated_at: HashMap<(u64, u32), DateTime<Utc>>,
 }
 
 impl Default for NotificationStore {
@@ -68,6 +72,7 @@ impl Default for NotificationStore {
             seeded: false,
             replies_seeded: false,
             items: Vec::new(),
+            mr_updated_at: HashMap::new(),
         }
     }
 }
@@ -279,6 +284,18 @@ fn collect_new_todos(
     out
 }
 
+/// Candidates that are new or whose `updated_at` moved since they were last read.
+fn changed_candidates(
+    candidates: &[MrCandidate],
+    seen: &HashMap<(u64, u32), DateTime<Utc>>,
+) -> Vec<MrCandidate> {
+    candidates
+        .iter()
+        .filter(|c| seen.get(&c.key()) != Some(&c.updated_at))
+        .cloned()
+        .collect()
+}
+
 /// Poll GitLab for new notifications and update the store.
 /// Returns newly appended items (empty during the initial seeding poll).
 pub async fn poll(
@@ -296,48 +313,60 @@ pub async fn poll(
     let candidates = gitlab::discover_candidate_mrs(host, current_user, &since)
         .await
         .unwrap_or_default();
+    let changed = changed_candidates(&candidates, &store.mr_updated_at);
+    let current: HashSet<(u64, u32)> = candidates.iter().map(MrCandidate::key).collect();
+    store.mr_updated_at.retain(|key, _| current.contains(key));
 
     let mut new_items = Vec::new();
     let mut max_note_id = store.last_note_id;
+    let mut notes_read = HashSet::new();
 
     if seeding {
-        let seed_futures = candidates.iter().map(|candidate| {
+        let seed_futures = changed.iter().map(|candidate| {
             let host = host.to_string();
-            let project_id = candidate.project_id;
-            let iid = candidate.iid;
-            async move { gitlab::fetch_mr_latest_note_id(&host, project_id, iid).await }
+            let (project_id, iid) = candidate.key();
+            async move {
+                let result = gitlab::fetch_mr_latest_note_id(&host, project_id, iid).await;
+                ((project_id, iid), result)
+            }
         });
-        for result in futures::future::join_all(seed_futures).await {
-            if let Ok(Some(id)) = result {
+        for (key, result) in futures::future::join_all(seed_futures).await {
+            let Ok(latest) = result else {
+                continue;
+            };
+            notes_read.insert(key);
+            if let Some(id) = latest {
                 max_note_id = max_note_id.max(id);
             }
         }
     } else {
-        let note_futures = candidates.iter().map(|candidate| {
+        let note_futures = changed.iter().map(|candidate| {
             let host = host.to_string();
             let candidate = candidate.clone();
             let user = current_user.to_string();
             let last_note_id = store.last_note_id;
-            async move { collect_new_notes(&host, &candidate, last_note_id, &user).await }
-        });
-        for result in futures::future::join_all(note_futures).await {
-            match result {
-                Ok(notes) => {
-                    for n in &notes {
-                        if let Some(id) = n.id.strip_prefix("note:") {
-                            if let Ok(num) = id.parse::<u64>() {
-                                max_note_id = max_note_id.max(num);
-                            }
-                        }
-                    }
-                    new_items.extend(notes);
-                }
-                Err(_e) => {}
+            async move {
+                let result = collect_new_notes(&host, &candidate, last_note_id, &user).await;
+                (candidate.key(), result)
             }
+        });
+        for (key, result) in futures::future::join_all(note_futures).await {
+            let Ok(notes) = result else {
+                continue;
+            };
+            notes_read.insert(key);
+            for n in &notes {
+                if let Some(id) = n.id.strip_prefix("note:") {
+                    if let Ok(num) = id.parse::<u64>() {
+                        max_note_id = max_note_id.max(num);
+                    }
+                }
+            }
+            new_items.extend(notes);
         }
     }
 
-    let discussion_futures = candidates.iter().map(|candidate| {
+    let discussion_futures = changed.iter().map(|candidate| {
         let host = host.to_string();
         let candidate = candidate.clone();
         async move {
@@ -361,6 +390,11 @@ pub async fn poll(
                 store.last_note_id,
                 current_user,
             ));
+        }
+        if notes_read.contains(&candidate.key()) {
+            store
+                .mr_updated_at
+                .insert(candidate.key(), candidate.updated_at);
         }
     }
     if seeding || !store.replies_seeded {
@@ -515,7 +549,25 @@ mod tests {
             iid: 7,
             web_url: "https://git.example.com/group/repo/-/merge_requests/7".to_string(),
             repo_path: "group/repo".to_string(),
+            updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn changed_candidates_skip_unchanged_merge_requests() {
+        let unchanged = candidate();
+        let mut moved = candidate();
+        moved.iid = 8;
+        let mut new = candidate();
+        new.iid = 9;
+        let seen = HashMap::from([
+            (unchanged.key(), unchanged.updated_at),
+            (moved.key(), moved.updated_at - Duration::minutes(1)),
+        ]);
+
+        let changed = changed_candidates(&[unchanged, moved, new], &seen);
+        let iids: Vec<u32> = changed.iter().map(|c| c.iid).collect();
+        assert_eq!(iids, vec![8, 9]);
     }
 
     #[test]

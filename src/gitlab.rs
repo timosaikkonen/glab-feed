@@ -85,9 +85,8 @@ query($fullPath: ID!) {
         author { username name }
         approvedBy { nodes { username } }
         userNotesCount
-        notes(last: 30) { nodes { author { username } createdAt system } }
+        notes(last: 30) { nodes { author { username } createdAt system systemNoteIconName } }
         headPipeline { status user { username } createdAt }
-        commits(last: 1) { nodes { author { username } committedDate } }
       }
     }
   }
@@ -146,7 +145,6 @@ struct MrNode {
     notes: NoteConnection,
     #[serde(rename = "headPipeline")]
     head_pipeline: Option<Pipeline>,
-    commits: CommitConnection,
 }
 
 #[derive(Debug, Deserialize)]
@@ -172,6 +170,15 @@ struct NoteNode {
     #[serde(rename = "createdAt")]
     created_at: DateTime<Utc>,
     system: bool,
+    /// `commit` on the "added N commits" system note GitLab writes for each push.
+    #[serde(rename = "systemNoteIconName", default)]
+    system_note_icon_name: Option<String>,
+}
+
+impl NoteNode {
+    fn is_push(&self) -> bool {
+        self.system && self.system_note_icon_name.as_deref() == Some("commit")
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,18 +187,6 @@ struct Pipeline {
     user: Option<UserRef>,
     #[serde(rename = "createdAt")]
     created_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CommitConnection {
-    nodes: Vec<CommitNode>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CommitNode {
-    author: Option<UserRef>,
-    #[serde(rename = "committedDate")]
-    committed_date: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -238,11 +233,11 @@ async fn run_graphql<T: for<'de> Deserialize<'de>>(
     resp.data.context("GraphQL response missing `data`")
 }
 
-/// Pick the most recent among pipeline run, human note, and latest commit.
+/// Pick the most recent among pipeline run, human note, and push.
 fn latest_update(
     pipeline: &Option<Pipeline>,
     last_human: Option<&NoteNode>,
-    last_commit: Option<&CommitNode>,
+    last_push: Option<&NoteNode>,
 ) -> Option<(UpdateActivity, String)> {
     let mut best: Option<(UpdateActivity, String, DateTime<Utc>)> = None;
 
@@ -263,14 +258,14 @@ fn latest_update(
             );
         }
     }
-    if let Some(commit) = last_commit {
-        if let Some(author) = &commit.author {
+    if let Some(push) = last_push {
+        if let Some(author) = &push.author {
             best = later(
                 best,
                 (
                     UpdateActivity::Push,
                     author.username.clone(),
-                    commit.committed_date,
+                    push.created_at,
                 ),
             );
         }
@@ -312,6 +307,7 @@ pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<Mer
         .map(|n| {
             // Most recent non-system note = last human commenter.
             let last_human = n.notes.nodes.iter().rev().find(|note| !note.system);
+            let last_push = n.notes.nodes.iter().rev().find(|note| note.is_push());
             let (author, name) = match n.author {
                 Some(u) => (u.username, u.name.unwrap_or_default()),
                 None => (String::new(), String::new()),
@@ -345,7 +341,7 @@ pub async fn fetch_merge_requests(host: &str, full_path: &str) -> Result<Vec<Mer
                 created_at: n.created_at,
                 updated_at: n.updated_at,
                 source_branch: n.source_branch,
-                last_update: latest_update(&n.head_pipeline, last_human, n.commits.nodes.first()),
+                last_update: latest_update(&n.head_pipeline, last_human, last_push),
             }
         })
         .collect::<Vec<_>>();
@@ -413,6 +409,13 @@ pub struct MrCandidate {
     pub iid: u32,
     pub web_url: String,
     pub repo_path: String,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl MrCandidate {
+    pub fn key(&self) -> (u64, u32) {
+        (self.project_id, self.iid)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -440,6 +443,7 @@ struct RestMr {
     iid: u32,
     project_id: u64,
     web_url: String,
+    updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -505,6 +509,7 @@ pub async fn discover_candidate_mrs(
                     iid: mr.iid,
                     web_url: mr.web_url,
                     repo_path,
+                    updated_at: mr.updated_at,
                 });
             }
         }
@@ -644,4 +649,43 @@ pub async fn fetch_pending_todos(host: &str) -> Result<Vec<RestTodo>> {
             created_at: t.created_at,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Duration;
+
+    fn note(author: &str, minutes_ago: i64, system: bool, icon: Option<&str>) -> NoteNode {
+        NoteNode {
+            author: Some(UserRef {
+                username: author.into(),
+                name: None,
+            }),
+            created_at: Utc::now() - Duration::minutes(minutes_ago),
+            system,
+            system_note_icon_name: icon.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn push_activity_comes_from_commit_system_notes() {
+        let notes = [
+            note("alice", 10, false, None),
+            note("bob", 5, true, Some("commit")),
+            note("carol", 1, true, Some("approval")),
+        ];
+        let last_human = notes.iter().rev().find(|n| !n.system);
+        let last_push = notes.iter().rev().find(|n| n.is_push());
+        assert_eq!(
+            latest_update(&None, last_human, last_push),
+            Some((UpdateActivity::Push, "bob".to_string()))
+        );
+    }
+
+    #[test]
+    fn other_system_notes_are_not_pushes() {
+        assert!(!note("carol", 1, true, Some("approval")).is_push());
+        assert!(!note("alice", 1, false, Some("commit")).is_push());
+    }
 }

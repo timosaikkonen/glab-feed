@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
+use tokio::time::MissedTickBehavior;
 
 use crate::app::{FetchResult, NotificationUpdate, PollEvent, PollUpdate, POLL_INTERVAL};
 use crate::config::RepoCfg;
@@ -34,6 +35,7 @@ pub fn spawn(
         let notification_store = Arc::new(Mutex::new(initial_notifications));
         let mut notif_task: Option<JoinHandle<()>> = None;
         let mut interval = tokio::time::interval(POLL_INTERVAL);
+        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
         // The first tick fires immediately, giving us an initial fetch.
         loop {
             tokio::select! {
