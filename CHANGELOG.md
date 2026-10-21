@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.3
+
+### Added
+
+- Collect notifications from every accessible project
+- Add a --debug log of GitLab requests
+
+### Fixed
+
+- Stop loading commits and unchanged notifications on every poll
+
 ## 0.2.2
 
 ### Added
