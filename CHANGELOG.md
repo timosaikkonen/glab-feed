@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.4
+
+### Added
+
+- Poll less when a tab or the window is not in use
+
+### Fixed
+
+- Load merge request notes in one list query
+
 ## 0.2.3
 
 ### Added
